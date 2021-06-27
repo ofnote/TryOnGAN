@@ -1180,7 +1180,8 @@ class Trainer():
             generated_images = G(w_styles, noise, pose_batch)
 
             #maybe detach pose_batch
-            fake_output, _ = D_aug(generated_images, pose_batch.clone().detach(), **aug_kwargs)
+            pose_batch_detached = [elem.clone().detach() for elem in pose_batch]
+            fake_output, _ = D_aug(generated_images, pose_batch_detached, **aug_kwargs)
             fake_output_loss = fake_output
 
             real_output = None
