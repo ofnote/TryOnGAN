@@ -30,11 +30,14 @@ import torchvision
 from torchvision import transforms
 from version import __version__
 from diff_augment import DiffAugment
+from poseEncoder import PoseEncoder
 
 from vector_quantize_pytorch import VectorQuantize
 
 from PIL import Image
 from pathlib import Path
+import pandas as pd
+from scipy.stats import multivariate_normal
 
 try:
     from apex import amp
@@ -269,6 +272,27 @@ def evaluate_in_chunks(max_batch_size, model, *args):
         return chunked_outputs[0]
     return torch.cat(chunked_outputs, dim=0)
 
+def evaluate_G_in_chunks(max_batch_size, model, poses, *args):
+    split_args = list(map(lambda x: x.split(max_batch_size, dim=0), args))
+    #print("in G chunk after mapping", len(split_args), len(split_args[0]))
+    #print("in G chunk poses", len(poses), len(poses[0]))
+    
+    split_args = list(zip(*split_args))
+    #print("in G chunk beore append", len(split_args), len(split_args[0]))
+    
+    new_args = []
+    for i in range(len(split_args)):
+        u = list(split_args[i])
+        u.append(poses[i])
+        new_args.append(tuple(u))
+
+    #print("in G chunk after append", len(new_args), len(new_args[0]), len(new_args[0][2]))
+
+    chunked_outputs = [model(*i) for i in new_args]
+    if len(chunked_outputs) == 1:
+        return chunked_outputs[0]
+    return torch.cat(chunked_outputs, dim=0)
+
 def styles_def_to_tensor(styles_def):
     return torch.cat([t[:, None, :].expand(-1, n, -1) for t, n in styles_def], dim=1)
 
@@ -347,7 +371,7 @@ def resize_to_minimum_size(min_size, image):
     return image
 
 class Dataset(data.Dataset):
-    def __init__(self, folder, image_size, transparent = False, aug_prob = 0.):
+    def __init__(self, folder, image_size, pose_file = None, transparent = False, aug_prob = 0.):
         super().__init__()
         self.folder = folder
         self.image_size = image_size
@@ -366,6 +390,8 @@ class Dataset(data.Dataset):
             transforms.Lambda(expand_greyscale(transparent))
         ])
 
+        self.df = pd.read_csv(pose_file)
+
     def __len__(self):
         #print("Dataset path is ", len(self.paths))
         return len(self.paths)
@@ -373,7 +399,50 @@ class Dataset(data.Dataset):
     def __getitem__(self, index):
         path = self.paths[index]
         img = Image.open(path)
-        return self.transform(img)
+
+        base = os.path.basename(path)
+        try :
+            keypoint = self.df[self.df['name'] == base]['keypoints'].tolist()[0]
+        except:
+            print("problem loading pose keypoints for ", base, " ,moving on to next.")
+            return self.__getitem__(index+1)
+        ptlist = keypoint.split(':')
+        ptlist = [float(x) for x in ptlist]
+        map = self.getHeatMap(ptlist)
+
+        return self.transform(img), map
+    
+    def getHeatMap(self, pose):
+        '''
+        pose should be a list of length 51, every 3 number for
+        x, y and confidence for each of the 17 keypoints.
+        '''
+
+        stack = []
+        for i in range(17):
+            x = pose[3*i]
+            
+            y = pose[3*i + 1]
+            c = pose[3*i + 2]
+            
+            ratio = 64.0 / self.image_size
+            map = self.getGaussianHeatMap([x*ratio, y*ratio])
+
+            if c < 0.4:
+                map = 0.0 * map
+            stack.append(map)
+        
+        maps = np.dstack(stack)
+        heatmap = torch.from_numpy(maps).transpose(0, -1)
+        return heatmap
+
+    def getGaussianHeatMap(self, bonePos):
+        width = 64
+        x, y = np.mgrid[0:width:1, 0:width:1]
+        pos = np.dstack((x, y))
+
+        gau = multivariate_normal(mean = list(bonePos), cov = [[width*0.02, 0.0], [0.0, width*0.02]]).pdf(pos)
+        return gau
 
 # augmentations
 
@@ -387,15 +456,14 @@ class AugWrapper(nn.Module):
         super().__init__()
         self.D = D
 
-    def forward(self, images, prob = 0., types = [], detach = False):
+    def forward(self, images, pose, prob = 0., types = [], detach = False):
         if random() < prob:
             images = random_hflip(images, prob=0.5)
             images = DiffAugment(images, types=types)
 
         if detach:
             images = images.detach()
-
-        return self.D(images)
+        return self.D(images, pose)
 
 # stylegan2 classes
 
@@ -594,35 +662,40 @@ class Generator(nn.Module):
             )
             self.blocks.append(block)
 
-    def forward(self, styles, input_noise):
+    def forward(self, styles, input_noise, pose_batch):
         batch_size = styles.shape[0]
         image_size = self.image_size
-
+        '''
         if self.no_const:
             avg_style = styles.mean(dim=1)[:, :, None, None]
             x = self.to_initial_block(avg_style)
         else:
             x = self.initial_block.expand(batch_size, -1, -1, -1)
-
+        '''
+        x = pose_batch[-1]
         rgb = None
         styles = styles.transpose(0, 1)
         x = self.initial_conv(x)
 
-        for style, block, attn in zip(styles, self.blocks, self.attns):
+        for ind, (style, block, attn) in enumerate(zip(styles, self.blocks, self.attns)):
             if exists(attn):
                 x = attn(x)
             x, rgb = block(x, rgb, style, input_noise)
+
+            if ind < len(pose_batch):
+                x = x + pose_batch[-ind - 1]
+
 
         return rgb
 
 class Discriminator(nn.Module):
     def __init__(self, image_size, network_capacity = 16, fq_layers = [], fq_dict_size = 256, attn_layers = [], transparent = False, fmap_max = 512):
         super().__init__()
-        num_layers = int(log2(image_size) - 1)
+        self.num_layers = int(log2(image_size) - 1)
         num_init_filters = 3 if not transparent else 4
 
         blocks = []
-        filters = [num_init_filters] + [(network_capacity * 4) * (2 ** i) for i in range(num_layers + 1)]
+        filters = [num_init_filters] + [(network_capacity * 4) * (2 ** i) for i in range(self.num_layers + 1)]
 
         set_fmap_max = partial(min, fmap_max)
         filters = list(map(set_fmap_max, filters))
@@ -655,14 +728,17 @@ class Discriminator(nn.Module):
 
         self.final_conv = nn.Conv2d(chan_last, chan_last, 3, padding=1)
         self.flatten = Flatten()
-        self.to_logit = nn.Linear(latent_dim, 1)
+        self.pose_fc = nn.ModuleList([nn.Linear(512*4*(4-i), 512*4*(4-i-1)) for i in range(3)])
+        self.to_logit = nn.Linear(2*latent_dim, 1)
 
-    def forward(self, x):
+    def forward(self, x, x_pose):
         b, *_ = x.shape
 
         quantize_loss = torch.zeros(1).to(x)
-
-        for (block, attn_block, q_block) in zip(self.blocks, self.attn_blocks, self.quantize_blocks):
+        for ind, (block, attn_block, q_block) in enumerate(zip(self.blocks, self.attn_blocks, self.quantize_blocks)):
+            
+            if self.num_layers - 6 < ind < self.num_layers:
+                x = x + x_pose[ind - self.num_layers + 5]
             x = block(x)
 
             if exists(attn_block):
@@ -674,6 +750,12 @@ class Discriminator(nn.Module):
 
         x = self.final_conv(x)
         x = self.flatten(x)
+
+        x4_pose = self.flatten(x_pose[-1])
+        for layer in self.pose_fc:        
+            x4_pose = F.leaky_relu(layer(x4_pose))
+
+        x = torch.cat([x, x4_pose], dim = -1)
         x = self.to_logit(x)
         return x.squeeze(), quantize_loss
 
@@ -684,6 +766,7 @@ class StyleGAN2(nn.Module):
         self.steps = steps
         self.ema_updater = EMA(0.995)
 
+        self.P = PoseEncoder(image_size)
         self.S = StyleVectorizer(latent_dim, style_depth, lr_mul = lr_mlp)
         self.G = Generator(image_size, latent_dim, network_capacity, transparent = transparent, attn_layers = attn_layers, no_const = no_const, fmap_max = fmap_max)
         self.D = Discriminator(image_size, network_capacity, fq_layers = fq_layers, fq_dict_size = fq_dict_size, attn_layers = attn_layers, transparent = transparent, fmap_max = fmap_max)
@@ -899,6 +982,7 @@ class Trainer():
 
         if self.is_ddp:
             ddp_kwargs = {'device_ids': [self.rank]}
+            self.P_ddp = DDP(self.GAN.P, **ddp_kwargs)
             self.S_ddp = DDP(self.GAN.S, **ddp_kwargs)
             self.G_ddp = DDP(self.GAN.G, **ddp_kwargs)
             self.D_ddp = DDP(self.GAN.D, **ddp_kwargs)
@@ -927,8 +1011,10 @@ class Trainer():
     def config(self):
         return {'image_size': self.image_size, 'network_capacity': self.network_capacity, 'lr_mlp': self.lr_mlp, 'transparent': self.transparent, 'fq_layers': self.fq_layers, 'fq_dict_size': self.fq_dict_size, 'attn_layers': self.attn_layers, 'no_const': self.no_const}
 
-    def set_data_src(self, folder):
-        self.dataset = Dataset(folder, self.image_size, transparent = self.transparent, aug_prob = self.dataset_aug_prob)
+    def set_data_src(self, data_list):
+        folder = data_list[0]
+        pose_csv = data_list[1]
+        self.dataset = Dataset(folder, self.image_size, pose_csv, transparent = self.transparent, aug_prob = self.dataset_aug_prob)
         num_workers = num_workers = default(self.num_workers, NUM_CORES if not self.is_ddp else 0)
         sampler = DistributedSampler(self.dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True) if self.is_ddp else None
         dataloader = data.DataLoader(self.dataset, num_workers = num_workers, batch_size = math.ceil(self.batch_size / self.world_size), sampler = sampler, shuffle = not self.is_ddp, drop_last = True, pin_memory = True)
@@ -964,6 +1050,7 @@ class Trainer():
         apply_path_penalty = not self.no_pl_reg and self.steps > 5000 and self.steps % 32 == 0
         apply_cl_reg_to_generated = self.steps > 20000
 
+        P = self.GAN.P if not self.is_ddp else self.P_ddp
         S = self.GAN.S if not self.is_ddp else self.S_ddp
         G = self.GAN.G if not self.is_ddp else self.G_ddp
         D = self.GAN.D if not self.is_ddp else self.D_ddp
@@ -1020,12 +1107,20 @@ class Trainer():
             w_space = latent_to_w(S, style)
             w_styles = styles_def_to_tensor(w_space)
 
-            generated_images = G(w_styles, noise)
-            fake_output, fake_q_loss = D_aug(generated_images.clone().detach(), detach = True, **aug_kwargs)
-
-            image_batch = next(self.loader).cuda(self.rank)
+            image_batch, pose_batch = next(self.loader)
+            image_batch = image_batch.cuda(self.rank)
+            pose_batch = pose_batch.float().cuda(self.rank)
             image_batch.requires_grad_()
-            real_output, real_q_loss = D_aug(image_batch, **aug_kwargs)
+
+            with torch.no_grad():
+                pose_batch = P(pose_batch)
+                pose_batch_detached = [elem.clone() for elem in pose_batch]
+                generated_images = G(w_styles, noise, pose_batch_detached)
+
+            pose_batch = [elem.clone().requires_grad_() for elem in pose_batch]
+
+            fake_output, fake_q_loss = D_aug(generated_images.clone().detach(), pose_batch_detached, detach = True, **aug_kwargs)
+            real_output, real_q_loss = D_aug(image_batch, pose_batch, **aug_kwargs)
 
             real_output_loss = real_output
             fake_output_loss = fake_output
@@ -1045,6 +1140,8 @@ class Trainer():
 
             if apply_gradient_penalty:
                 gp = gradient_penalty(image_batch, real_output)
+                for elem in pose_batch:
+                    gp = gp + gradient_penalty(elem, real_output)
                 self.last_gp_loss = gp.clone().detach().item()
                 self.track(self.last_gp_loss, 'GP')
                 disc_loss = disc_loss + gp
@@ -1065,19 +1162,25 @@ class Trainer():
         self.GAN.G_opt.zero_grad()
 
         for i in gradient_accumulate_contexts(self.gradient_accumulate_every, self.is_ddp, ddps=[S, G, D_aug]):
+            get_latents_fn = mixed_list if random() < self.mixed_prob else noise_list
             style = get_latents_fn(batch_size, num_layers, latent_dim, device=self.rank)
             noise = image_noise(batch_size, image_size, device=self.rank)
 
             w_space = latent_to_w(S, style)
             w_styles = styles_def_to_tensor(w_space)
 
-            generated_images = G(w_styles, noise)
-            fake_output, _ = D_aug(generated_images, **aug_kwargs)
+            image_batch, pose_batch = next(self.loader)
+            pose_batch = pose_batch.float().cuda(self.rank)
+            pose_batch = P(pose_batch)
+            
+            generated_images = G(w_styles, noise, pose_batch)
+            fake_output, _ = D_aug(generated_images, pose_batch, **aug_kwargs)
             fake_output_loss = fake_output
 
             real_output = None
             if G_requires_reals:
                 image_batch = next(self.loader).cuda(self.rank)
+                #this won't work
                 real_output, _ = D_aug(image_batch, detach = True, **aug_kwargs)
                 real_output = real_output.detach()
 
@@ -1168,12 +1271,12 @@ class Trainer():
 
         # regular
 
-        generated_images = self.generate_truncated(self.GAN.S, self.GAN.G, latents, n, trunc_psi = self.trunc_psi)
+        generated_images = self.generate_truncated(self.GAN.S, self.GAN.G, self.GAN.P, latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}.{ext}'), nrow=num_rows)
         
         # moving averages
 
-        generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, latents, n, trunc_psi = self.trunc_psi)
+        generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, self.GAN.P, latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-ema.{ext}'), nrow=num_rows)
 
         # mixing regularities
@@ -1193,7 +1296,7 @@ class Trainer():
         tt = int(num_layers / 2)
         mixed_latents = [(tmp1, tt), (tmp2, num_layers - tt)]
 
-        generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, mixed_latents, n, trunc_psi = self.trunc_psi)
+        generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, self.GAN.P, mixed_latents, n, trunc_psi = self.trunc_psi)
         torchvision.utils.save_image(generated_images, str(self.results_dir / self.name / f'{str(num)}-mr.{ext}'), nrow=num_rows)
 
     @torch.no_grad()
@@ -1234,7 +1337,7 @@ class Trainer():
             noise = image_noise(self.batch_size, image_size, device=self.rank)
 
             # moving averages
-            generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, latents, noise, trunc_psi = self.trunc_psi)
+            generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, self.GAN.P, latents, noise, trunc_psi = self.trunc_psi)
 
             for j, image in enumerate(generated_images.unbind(0)):
                 torchvision.utils.save_image(image, str(fake_path / f'{str(j + batch_num * self.batch_size)}-ema.{ext}'))
@@ -1266,11 +1369,21 @@ class Trainer():
         return w_space
 
     @torch.no_grad()
-    def generate_truncated(self, S, G, style, noi, trunc_psi = 0.75, num_image_tiles = 8):
+    def generate_truncated(self, S, G, P, style, noi, trunc_psi = 0.75, num_image_tiles = 8):
         w = map(lambda t: (S(t[0]), t[1]), style)
         w_truncated = self.truncate_style_defs(w, trunc_psi = trunc_psi)
         w_styles = styles_def_to_tensor(w_truncated)
-        generated_images = evaluate_in_chunks(self.batch_size, G, w_styles, noi)
+        print(self.batch_size, w_styles.shape, noi.shape)
+
+        poses = []
+        for i in range((num_image_tiles*num_image_tiles)//self.batch_size):
+            _, pose_batch = next(self.loader)
+
+            pose_batch = pose_batch.float().cuda(self.rank)
+            pose = P(pose_batch)
+            poses.append(pose)
+        
+        generated_images = evaluate_G_in_chunks(self.batch_size, G, poses, w_styles, noi)
         return generated_images.clamp_(0., 1.)
 
     @torch.no_grad()
@@ -1295,7 +1408,7 @@ class Trainer():
         for ratio in tqdm(ratios):
             interp_latents = slerp(ratio, latents_low, latents_high)
             latents = [(interp_latents, num_layers)]
-            generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, latents, n, trunc_psi = self.trunc_psi)
+            generated_images = self.generate_truncated(self.GAN.SE, self.GAN.GE, self.GAN.P, latents, n, trunc_psi = self.trunc_psi)
             images_grid = torchvision.utils.make_grid(generated_images, nrow = num_rows)
             pil_image = transforms.ToPILImage()(images_grid.cpu())
             
