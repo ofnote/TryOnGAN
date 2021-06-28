@@ -11,6 +11,7 @@ from shutil import rmtree
 from functools import partial
 import multiprocessing
 from contextlib import contextmanager, ExitStack
+import traceback
 
 import numpy as np
 
@@ -403,8 +404,11 @@ class Dataset(data.Dataset):
         base = os.path.basename(path)
         try :
             keypoint = self.df[self.df['name'] == base]['keypoints'].tolist()[0]
-        except:
-            print("problem loading pose keypoints for ", base, " ,moving on to next.")
+        except Exception as e:
+            #print("Exception is", e)
+            #traceback.print_exc()
+            #os.rename(path, '/home/saurabh/Projects/ML/gan/TryOnGAN/data/nolabel/'+ base)
+            #print("problem loading pose keypoints for ", base, " ,moving on to next.")
             return self.__getitem__(index+1)
         ptlist = keypoint.split(':')
         ptlist = [float(x) for x in ptlist]
@@ -1114,10 +1118,10 @@ class Trainer():
 
             with torch.no_grad():
                 pose_batch = P(pose_batch)
-                pose_batch_detached = [elem.clone() for elem in pose_batch]
+                pose_batch_detached = [elem.clone().detach() for elem in pose_batch]
                 generated_images = G(w_styles, noise, pose_batch_detached)
 
-            pose_batch = [elem.clone().requires_grad_() for elem in pose_batch]
+            pose_batch = [elem.clone().detach().requires_grad_() for elem in pose_batch]
 
             fake_output, fake_q_loss = D_aug(generated_images.clone().detach(), pose_batch_detached, detach = True, **aug_kwargs)
             real_output, real_q_loss = D_aug(image_batch, pose_batch, **aug_kwargs)
@@ -1174,7 +1178,9 @@ class Trainer():
             pose_batch = P(pose_batch)
             
             generated_images = G(w_styles, noise, pose_batch)
-            fake_output, _ = D_aug(generated_images, pose_batch, **aug_kwargs)
+
+            #maybe detach pose_batch
+            fake_output, _ = D_aug(generated_images, pose_batch.clone().detach(), **aug_kwargs)
             fake_output_loss = fake_output
 
             real_output = None
@@ -1373,7 +1379,6 @@ class Trainer():
         w = map(lambda t: (S(t[0]), t[1]), style)
         w_truncated = self.truncate_style_defs(w, trunc_psi = trunc_psi)
         w_styles = styles_def_to_tensor(w_truncated)
-        print(self.batch_size, w_styles.shape, noi.shape)
 
         poses = []
         for i in range((num_image_tiles*num_image_tiles)//self.batch_size):
