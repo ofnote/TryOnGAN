@@ -16,6 +16,7 @@ import PIL.Image
 import numpy as np
 import torch
 import dnnlib
+import wandb
 from torch_utils import misc
 from torch_utils import training_stats
 from torch_utils.ops import conv2d_gradfix
@@ -399,8 +400,12 @@ def training_loop(
             walltime = timestamp - start_time
             for name, value in stats_dict.items():
                 stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
+                print("saving logs to wandb")
+                wandb.log({"name": name, "value": value.mean, "walltime": walltime}, step=global_step)
             for name, value in stats_metrics.items():
                 stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
+                print("saving logs to wandb")
+                wandb.log({"name": f'Metrics/{name}', "value": value, "walltime": walltime}, step=global_step)
             stats_tfevents.flush()
         if progress_fn is not None:
             progress_fn(cur_nimg // 1000, total_kimg)

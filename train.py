@@ -16,6 +16,7 @@ import json
 import tempfile
 import torch
 import dnnlib
+import wandb
 
 from training import training_loop
 from metrics import metric_main
@@ -380,7 +381,8 @@ def subprocess_fn(rank, args, temp_dir):
         custom_ops.verbosity = 'none'
 
     # Execute training loop.
-    training_loop.training_loop(rank=rank, **args)
+    with wandb.init(project="pytorch-demo", config=args):
+        training_loop.training_loop(rank=rank, **args)
 
 #----------------------------------------------------------------------------
 
