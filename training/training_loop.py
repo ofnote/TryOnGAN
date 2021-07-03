@@ -398,14 +398,17 @@ def training_loop(
         if stats_tfevents is not None:
             global_step = int(cur_nimg / 1e3)
             walltime = timestamp - start_time
+            wandbDict = {'walltime': walltime}
             for name, value in stats_dict.items():
                 stats_tfevents.add_scalar(name, value.mean, global_step=global_step, walltime=walltime)
-                print("saving logs to wandb")
-                wandb.log({"name": name, "value": value.mean, "walltime": walltime}, step=global_step)
+                wandbDict[name] = value
             for name, value in stats_metrics.items():
                 stats_tfevents.add_scalar(f'Metrics/{name}', value, global_step=global_step, walltime=walltime)
-                print("saving logs to wandb")
-                wandb.log({"name": f'Metrics/{name}', "value": value, "walltime": walltime}, step=global_step)
+                wandbDict[f'Metrics/{name}'] = value
+
+            print("saving logs to wandb")
+            wandb.log(wandbDict, step=global_step, commit=True)
+
             stats_tfevents.flush()
         if progress_fn is not None:
             progress_fn(cur_nimg // 1000, total_kimg)
