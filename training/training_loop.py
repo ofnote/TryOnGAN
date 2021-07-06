@@ -119,6 +119,8 @@ def training_loop(
     allow_tf32              = False,    # Enable torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32?
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
+    project                 = None,
+    run                     = None,
 ):
     # Initialize.
     start_time = time.time()
@@ -407,7 +409,7 @@ def training_loop(
                 wandbDict[f'Metrics/{name}'] = value
 
             print("saving logs to wandb")
-            wandb.log(wandbDict, step=global_step, commit=True)
+            wandb.log(wandbDict, commit=True)
 
             stats_tfevents.flush()
         if progress_fn is not None:

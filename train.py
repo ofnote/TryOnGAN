@@ -65,6 +65,9 @@ def setup_training_loop_kwargs(
     allow_tf32 = None, # Allow PyTorch to use TF32 for matmul and convolutions: <bool>, default = False
     nobench    = None, # Disable cuDNN benchmarking: <bool>, default = False
     workers    = None, # Override number of DataLoader workers: <int>, default = 3
+
+    project = 'Project',
+    run = None
 ):
     args = dnnlib.EasyDict()
 
@@ -357,6 +360,8 @@ def setup_training_loop_kwargs(
             raise UserError('--workers must be at least 1')
         args.data_loader_kwargs.num_workers = workers
 
+    args.project = project
+    args.run = run
     return desc, args
 
 #----------------------------------------------------------------------------
@@ -381,8 +386,14 @@ def subprocess_fn(rank, args, temp_dir):
         custom_ops.verbosity = 'none'
 
     # Execute training loop.
-    with wandb.init(project="pytorch-demo", config=args):
-        training_loop.training_loop(rank=rank, **args)
+    if args.run is None:
+        with wandb.init(project=args.project):
+            print("run id is : ", wandb.run.id)
+            print("Use the run id next time to resume logging")
+            training_loop.training_loop(rank=rank, **args)
+    else:
+        with wandb.init(project=args.project, resume=args.run):
+            training_loop.training_loop(rank=rank, **args)
 
 #----------------------------------------------------------------------------
 
@@ -436,6 +447,10 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--nobench', help='Disable cuDNN benchmarking', type=bool, metavar='BOOL')
 @click.option('--allow-tf32', help='Allow PyTorch to use TF32 internally', type=bool, metavar='BOOL')
 @click.option('--workers', help='Override number of DataLoader workers', type=int, metavar='INT')
+
+# wandb options
+@click.option('--project')
+@click.option('--run')
 
 def main(ctx, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper
@@ -512,6 +527,8 @@ def main(ctx, outdir, dry_run, **config_kwargs):
     print(f'Image resolution:   {args.training_set_kwargs.resolution}')
     print(f'Conditional model:  {args.training_set_kwargs.use_labels}')
     print(f'Dataset x-flips:    {args.training_set_kwargs.xflip}')
+    print(f'Project name:       {args.project}')
+    print(f'Run name:           {args.run}')
     print()
 
     # Dry run?
