@@ -14,6 +14,7 @@ from torch_utils.ops import conv2d_resample
 from torch_utils.ops import upfirdn2d
 from torch_utils.ops import bias_act
 from torch_utils.ops import fma
+from poseEncoder import PoseEncoder
 
 #----------------------------------------------------------------------------
 
@@ -355,9 +356,6 @@ class SynthesisBlock(torch.nn.Module):
         self.num_conv = 0
         self.num_torgb = 0
 
-        if in_channels == 0:
-            self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution]))
-
         if in_channels != 0:
             self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
                 resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last, **layer_kwargs)
@@ -386,10 +384,7 @@ class SynthesisBlock(torch.nn.Module):
                 fused_modconv = (not self.training) and (dtype == torch.float32 or int(x.shape[0]) == 1)
 
         # Input.
-        if self.in_channels == 0:
-            x = self.const.to(dtype=dtype, memory_format=memory_format)
-            x = x.unsqueeze(0).repeat([ws.shape[0], 1, 1, 1])
-        else:
+        if self.in_channels != 0:
             misc.assert_shape(x, [None, self.in_channels, self.resolution // 2, self.resolution // 2])
             x = x.to(dtype=dtype, memory_format=memory_format)
 
@@ -441,6 +436,7 @@ class SynthesisNetwork(torch.nn.Module):
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
 
+        self.P = PoseEncoder(imageSize=self.img_resolution, channel_base=channel_base)
         self.num_ws = 0
         for res in self.block_resolutions:
             in_channels = channels_dict[res // 2] if res > 4 else 0
@@ -454,7 +450,7 @@ class SynthesisNetwork(torch.nn.Module):
                 self.num_ws += block.num_torgb
             setattr(self, f'b{res}', block)
 
-    def forward(self, ws, pose_enc, **block_kwargs):
+    def forward(self, ws, pose, ret_pose=True, **block_kwargs):
         block_ws = []
         with torch.autograd.profiler.record_function('split_ws'):
             misc.assert_shape(ws, [None, self.num_ws, self.w_dim])
@@ -466,10 +462,16 @@ class SynthesisNetwork(torch.nn.Module):
                 w_idx += block.num_conv
 
         x = img = None
+        pose_enc = self.P(pose)
+        x = pose_enc[4]
         for res, cur_ws in zip(self.block_resolutions, block_ws):
             block = getattr(self, f'b{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
-            x = x + pose_enc[res]
+            if res <= 64:
+                x = x + pose_enc[res]
+        
+        if ret_pose:
+            return img, pose_enc
         return img
 
 #----------------------------------------------------------------------------
@@ -495,10 +497,10 @@ class Generator(torch.nn.Module):
         self.num_ws = self.synthesis.num_ws
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
 
-    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
+    def forward(self, z, c, pose, truncation_psi=1, truncation_cutoff=None, ret_pose=False, **synthesis_kwargs):
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
-        img = self.synthesis(ws, **synthesis_kwargs)
-        return img
+        return self.synthesis(ws, pose, ret_pose=ret_pose,**synthesis_kwargs)
+        
 
 #----------------------------------------------------------------------------
 
@@ -715,11 +717,13 @@ class Discriminator(torch.nn.Module):
             self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
 
-    def forward(self, img, c, **block_kwargs):
+    def forward(self, img, pose, c, **block_kwargs):
         x = None
         for res in self.block_resolutions:
             block = getattr(self, f'b{res}')
             x, img = block(x, img, **block_kwargs)
+            if res/2 <= 64:
+                x = x + pose[res/2]
 
         cmap = None
         if self.c_dim > 0:

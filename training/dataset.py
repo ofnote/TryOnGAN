@@ -92,13 +92,13 @@ class Dataset(torch.utils.data.Dataset):
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self.image_shape
         assert image.dtype == np.uint8
+        pose = self.get_pose(self._raw_idx[idx])
+    
         if self._xflip[idx]:
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
-        try:
-            pose = self.get_pose(idx)
-        except:
-            return self.__getitem__(idx + 1)
+            pose = torch.flip(pose, [-1])
+        
         return image.copy(), self.get_label(idx), pose
 
     def get_label(self, idx):
@@ -190,6 +190,7 @@ class ImageFolderDataset(Dataset):
             raise IOError('Image files do not match the specified resolution')
 
         self.df = pd.read_csv(pose_file)
+        self.image_size = resolution
         super().__init__(name=name, raw_shape=raw_shape, **super_kwargs)
 
     @staticmethod
@@ -248,11 +249,15 @@ class ImageFolderDataset(Dataset):
 
     def get_pose(self, idx):
         base = os.path.basename(self.fname)
-        keypoint = self.df[self.df['name'] == base]['keypoints'].tolist()[0]
-        ptlist = keypoint.split(':')
-        ptlist = [float(x) for x in ptlist]
-        map = self.getHeatMap(ptlist)
-        return map
+        keypoint = self.df[self.df['name'] == base]['keypoints'].tolist()
+        if len(keypoint) > 0:
+            keypoint = keypoint[0]
+            ptlist = keypoint.split(':')
+            ptlist = [float(x) for x in ptlist]
+            maps = self.getHeatMap(ptlist)
+        else:
+            maps = torch.zeros(17, 64, 64)
+        return maps.float()
 
     def getHeatMap(self, pose):
         '''
