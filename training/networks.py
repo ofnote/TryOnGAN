@@ -440,6 +440,8 @@ class SynthesisNetwork(torch.nn.Module):
         self.num_ws = 0
         for res in self.block_resolutions:
             in_channels = channels_dict[res // 2] if res > 4 else 0
+            if res <=128:
+                in_channels = in_channels*2
             out_channels = channels_dict[res]
             use_fp16 = (res >= fp16_resolution)
             is_last = (res == self.img_resolution)
@@ -468,7 +470,7 @@ class SynthesisNetwork(torch.nn.Module):
             block = getattr(self, f'b{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
             if res <= 64:
-                x = x + pose_enc[res]
+                x = torch.cat([x, pose_enc[res]], dim=1)
         
         if ret_pose:
             return img, pose_enc
@@ -707,6 +709,9 @@ class Discriminator(torch.nn.Module):
         for res in self.block_resolutions:
             in_channels = channels_dict[res] if res < img_resolution else 0
             tmp_channels = channels_dict[res]
+            if res <= 64:
+                in_channels = 2*in_channels
+                tmp_channels = 2*tmp_channels
             out_channels = channels_dict[res // 2]
             use_fp16 = (res >= fp16_resolution)
             block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, resolution=res,
@@ -721,9 +726,9 @@ class Discriminator(torch.nn.Module):
         x = None
         for res in self.block_resolutions:
             block = getattr(self, f'b{res}')
+            if res <=64:
+                x = torch.cat([x, pose[res]], dim=1)
             x, img = block(x, img, **block_kwargs)
-            if res/2 <= 64:
-                x = x + pose[res/2]
 
         cmap = None
         if self.c_dim > 0:
