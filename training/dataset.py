@@ -69,6 +69,9 @@ class Dataset(torch.utils.data.Dataset):
     def _load_raw_image(self, raw_idx): # to be overridden by subclass
         raise NotImplementedError
 
+    def _load_parsemap(self, raw_idx): # to be overridden by subclass
+        raise NotImplementedError
+
     def _load_raw_labels(self): # to be overridden by subclass
         raise NotImplementedError
 
@@ -92,14 +95,24 @@ class Dataset(torch.utils.data.Dataset):
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self.image_shape
         assert image.dtype == np.uint8
+
+        parsemap = self._load_parsemap(self._raw_idx[idx])
+        assert isinstance(parsemap, np.ndarray)
+        #assert list(parsemap.shape) == self.image_shape
+        assert parsemap.dtype == np.uint8
+
         pose = self.get_pose(self._raw_idx[idx])
     
         if self._xflip[idx]:
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
+
+            assert parsemap.ndim == 3 # CHW
+            parsemap = parsemap[:, :, ::-1]
+
             pose = torch.flip(pose, [-1])
         
-        return image.copy(), self.get_label(idx), pose
+        return image.copy(), parsemap.copy(), self.get_label(idx), pose
 
     def get_label(self, idx):
         label = self._get_raw_labels()[self._raw_idx[idx]]
@@ -163,19 +176,22 @@ class Dataset(torch.utils.data.Dataset):
 class ImageFolderDataset(Dataset):
     def __init__(self,
         path,                   # Path to directory or zip.
-        pose_file,
+        parsepath,              # Path to zip for parse maps
+        pose_file,              # Path to csv file with pose keypoints
         resolution      = None, # Ensure specific resolution, None = highest available.
         **super_kwargs,         # Additional arguments for the Dataset base class.
     ):
         self._path = path
+        self._parsepath = parsepath
         self._zipfile = None
 
+        #load RGB image fnames
         if os.path.isdir(self._path):
             self._type = 'dir'
             self._all_fnames = {os.path.relpath(os.path.join(root, fname), start=self._path) for root, _dirs, files in os.walk(self._path) for fname in files}
         elif self._file_ext(self._path) == '.zip':
             self._type = 'zip'
-            self._all_fnames = set(self._get_zipfile().namelist())
+            self._all_fnames = set(self._get_zipfile(self._path).namelist())
         else:
             raise IOError('Path must point to a directory or zip')
 
@@ -183,6 +199,21 @@ class ImageFolderDataset(Dataset):
         self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
         if len(self._image_fnames) == 0:
             raise IOError('No image files found in the specified path')
+
+        #load parse file names
+        if os.path.isdir(self._parsepath):
+            self._type = 'dir'
+            self._all_parse_fnames = {os.path.relpath(os.path.join(root, fname), start=self._parsepath) for root, _dirs, files in os.walk(self._parsepath) for fname in files}
+        elif self._file_ext(self._parsepath) == '.zip':
+            self._type = 'zip'
+            self._all_parse_fnames = set(self._get_zipfile(self._parsepath).namelist())
+        else:
+            raise IOError('Path must point to a directory or zip')
+
+        self._parse_fnames = sorted(fname for fname in self._all_parse_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
+        if len(self._parse_fnames) == 0:
+            raise IOError('No image files found in the specified path')
+        
 
         name = os.path.splitext(os.path.basename(self._path))[0]
         raw_shape = [len(self._image_fnames)] + list(self._load_raw_image(0).shape)
@@ -197,17 +228,17 @@ class ImageFolderDataset(Dataset):
     def _file_ext(fname):
         return os.path.splitext(fname)[1].lower()
 
-    def _get_zipfile(self):
+    def _get_zipfile(self, path):
         assert self._type == 'zip'
         if self._zipfile is None:
-            self._zipfile = zipfile.ZipFile(self._path)
+            self._zipfile = zipfile.ZipFile(path)
         return self._zipfile
 
-    def _open_file(self, fname):
+    def _open_file(self, fname, path):
         if self._type == 'dir':
-            return open(os.path.join(self._path, fname), 'rb')
+            return open(os.path.join(path, fname), 'rb')
         if self._type == 'zip':
-            return self._get_zipfile().open(fname, 'r')
+            return self._get_zipfile(path).open(fname, 'r')
         return None
 
     def close(self):
@@ -223,7 +254,20 @@ class ImageFolderDataset(Dataset):
     def _load_raw_image(self, raw_idx):
         fname = self._image_fnames[raw_idx]
         self.fname = fname
-        with self._open_file(fname) as f:
+        with self._open_file(fname, self._path) as f:
+            if pyspng is not None and self._file_ext(fname) == '.png':
+                image = pyspng.load(f.read())
+            else:
+                image = np.array(PIL.Image.open(f))
+        if image.ndim == 2:
+            image = image[:, :, np.newaxis] # HW => HWC
+        image = image.transpose(2, 0, 1) # HWC => CHW
+        return image
+
+    def _load_parsemap(self, raw_idx):
+        fname = self._parse_fnames[raw_idx]
+        self.fname = fname
+        with self._open_file(fname, self._parsepath) as f:
             if pyspng is not None and self._file_ext(fname) == '.png':
                 image = pyspng.load(f.read())
             else:
