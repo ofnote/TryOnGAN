@@ -62,8 +62,8 @@ def setup_snapshot_image_grid(training_set, random_seed=0):
             label_groups[label] = [indices[(i + gw) % len(indices)] for i in range(len(indices))]
 
     # Load data.
-    images, labels, pose = zip(*[training_set[i] for i in grid_indices])
-    return (gw, gh), np.stack(images), np.stack(labels), np.stack(pose)
+    images, parsemaps, labels, pose = zip(*[training_set[i] for i in grid_indices])
+    return (gw, gh), np.stack(images), np.stack(labels), np.stack(pose), np.stack(parsemaps)
 
 #----------------------------------------------------------------------------
 
@@ -229,7 +229,7 @@ def training_loop(
     grid_c = None
     if rank == 0:
         print('Exporting sample images...')
-        grid_size, images, labels, pose = setup_snapshot_image_grid(training_set=training_set)
+        grid_size, images, labels, pose, parsemaps = setup_snapshot_image_grid(training_set=training_set)
         save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
         grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
         grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
@@ -269,8 +269,9 @@ def training_loop(
 
         # Fetch training data.
         with torch.autograd.profiler.record_function('data_fetch'):
-            phase_real_img, phase_real_c, phase_pose = next(training_set_iterator)
+            phase_real_img, phase_real_pmap, phase_real_c, phase_pose = next(training_set_iterator)
             phase_real_img = (phase_real_img.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
+            phase_real_pmap = (phase_real_pmap.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
             phase_real_c = phase_real_c.to(device).split(batch_gpu)
             phase_pose = phase_pose.to(device).split(batch_gpu)
             all_gen_z = torch.randn([len(phases) * batch_size, G.z_dim], device=device)
@@ -291,10 +292,10 @@ def training_loop(
             phase.module.requires_grad_(True)
 
             # Accumulate gradients over multiple rounds.
-            for round_idx, (real_img, pose, real_c, gen_z, gen_c) in enumerate(zip(phase_real_img, phase_pose, phase_real_c, phase_gen_z, phase_gen_c)):
+            for round_idx, (real_img, real_pmap, pose, real_c, gen_z, gen_c) in enumerate(zip(phase_real_img, phase_real_pmap, phase_pose, phase_real_c, phase_gen_z, phase_gen_c)):
                 sync = (round_idx == batch_size // (batch_gpu * num_gpus) - 1)
                 gain = phase.interval
-                loss.accumulate_gradients(phase=phase.name, real_img=real_img, pose = pose, real_c=real_c, gen_z=gen_z, gen_c=gen_c, sync=sync, gain=gain)
+                loss.accumulate_gradients(phase=phase.name, real_img=real_img, real_pmap=real_pmap, pose = pose, real_c=real_c, gen_z=gen_z, gen_c=gen_c, sync=sync, gain=gain)
 
             # Update weights.
             phase.module.requires_grad_(False)
