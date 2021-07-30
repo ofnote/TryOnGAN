@@ -184,6 +184,7 @@ class ImageFolderDataset(Dataset):
         self._path = path
         self._parsepath = parsepath
         self._zipfile = None
+        self._parse_zipfile = None
 
         #load RGB image fnames
         if os.path.isdir(self._path):
@@ -230,9 +231,15 @@ class ImageFolderDataset(Dataset):
 
     def _get_zipfile(self, path):
         assert self._type == 'zip'
-        if self._zipfile is None:
-            self._zipfile = zipfile.ZipFile(path)
-        return self._zipfile
+        if path == self._path:
+            if self._zipfile is None:
+                self._zipfile = zipfile.ZipFile(path)
+            return self._zipfile
+        elif path == self._parsepath:
+            if self._parse_zipfile is None:
+                self._parse_zipfile = zipfile.ZipFile(path)
+            return self._parse_zipfile
+        
 
     def _open_file(self, fname, path):
         if self._type == 'dir':
@@ -248,8 +255,14 @@ class ImageFolderDataset(Dataset):
         finally:
             self._zipfile = None
 
+        try:
+            if self._parse_zipfile is not None:
+                self._parse_zipfile.close()
+        finally:
+            self._parse_zipfile = None
+
     def __getstate__(self):
-        return dict(super().__getstate__(), _zipfile=None)
+        return dict(super().__getstate__(), _zipfile=None, _parse_zipfile=None)
 
     def _load_raw_image(self, raw_idx):
         fname = self._image_fnames[raw_idx]
@@ -266,7 +279,6 @@ class ImageFolderDataset(Dataset):
 
     def _load_parsemap(self, raw_idx):
         fname = self._parse_fnames[raw_idx]
-        self.fname = fname
         with self._open_file(fname, self._parsepath) as f:
             if pyspng is not None and self._file_ext(fname) == '.png':
                 image = pyspng.load(f.read())
@@ -281,7 +293,7 @@ class ImageFolderDataset(Dataset):
         fname = 'dataset.json'
         if fname not in self._all_fnames:
             return None
-        with self._open_file(fname) as f:
+        with self._open_file(fname, self._path) as f:
             labels = json.load(f)['labels']
         if labels is None:
             return None

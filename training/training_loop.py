@@ -231,6 +231,7 @@ def training_loop(
         print('Exporting sample images...')
         grid_size, images, labels, pose, parsemaps = setup_snapshot_image_grid(training_set=training_set)
         save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+        save_image_grid(parsemaps, os.path.join(run_dir, 'parsemaps.png'), drange=[0,7], grid_size=grid_size)
         grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
         grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
         grid_pose = torch.from_numpy(pose).to(device).split(batch_gpu)
