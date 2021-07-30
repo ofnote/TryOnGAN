@@ -173,8 +173,8 @@ def training_loop(
         z = torch.empty([batch_gpu, G.z_dim], device=device)
         c = torch.empty([batch_gpu, G.c_dim], device=device)
         pose = torch.empty([batch_gpu, 17, 64, 64], device=device)
-        img, pose_enc = misc.print_module_summary(G, [z, c, pose, 1, None, True])
-        misc.print_module_summary(D, [img, pose_enc, c])
+        img, pmap, pose_enc = misc.print_module_summary(G, [z, c, pose, 1, None, True])
+        misc.print_module_summary(D, [img, pmap, pose_enc, c])
 
     # Setup augmentation.
     if rank == 0:
@@ -272,7 +272,7 @@ def training_loop(
         with torch.autograd.profiler.record_function('data_fetch'):
             phase_real_img, phase_real_pmap, phase_real_c, phase_pose = next(training_set_iterator)
             phase_real_img = (phase_real_img.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
-            phase_real_pmap = (phase_real_pmap.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
+            phase_real_pmap = (phase_real_pmap.to(device).to(torch.float32) / 3 - 1).split(batch_gpu)
             phase_real_c = phase_real_c.to(device).split(batch_gpu)
             phase_pose = phase_pose.to(device).split(batch_gpu)
             all_gen_z = torch.randn([len(phases) * batch_size, G.z_dim], device=device)
