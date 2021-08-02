@@ -92,7 +92,7 @@ class StyleGAN2Loss(Loss):
                 loss_Gpl = pl_penalty * self.pl_weight
                 training_stats.report('Loss/G/reg', loss_Gpl)
             with torch.autograd.profiler.record_function('Gpl_backward'):
-                (gen_img[:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
+                (gen_img[:, 0, 0, 0] * 0 + gen_pmap[:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
 
         # Dmain: Minimize logits for generated images.
         loss_Dgen = 0

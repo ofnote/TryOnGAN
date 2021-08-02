@@ -562,10 +562,6 @@ class DiscriminatorBlock(torch.nn.Module):
             self.fromrgb = Conv2dLayer(img_channels, tmp_channels, kernel_size=1, activation=activation,
                 trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
 
-            self.frompmap = Conv2dLayer(1, tmp_channels, kernel_size=1, activation=activation,
-                trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
-
-
         self.conv0 = Conv2dLayer(tmp_channels, tmp_channels, kernel_size=3, activation=activation,
             trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
 
@@ -576,7 +572,7 @@ class DiscriminatorBlock(torch.nn.Module):
             self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, down=2,
                 trainable=next(trainable_iter), resample_filter=resample_filter, channels_last=self.channels_last)
 
-    def forward(self, x, img, pmap, force_fp32=False):
+    def forward(self, x, img, force_fp32=False):
         dtype = torch.float16 if self.use_fp16 and not force_fp32 else torch.float32
         memory_format = torch.channels_last if self.channels_last and not force_fp32 else torch.contiguous_format
 
@@ -593,12 +589,6 @@ class DiscriminatorBlock(torch.nn.Module):
             x = x + y if x is not None else y
             img = upfirdn2d.downsample2d(img, self.resample_filter) if self.architecture == 'skip' else None
 
-            misc.assert_shape(pmap, [None, 1, self.resolution, self.resolution])
-            pmap = pmap.to(dtype=dtype, memory_format=memory_format)
-            ypmap = self.frompmap(pmap)
-            x = x + ypmap if x is not None else ypmap
-            pmap = upfirdn2d.downsample2d(pmap, self.resample_filter) if self.architecture == 'skip' else None
-
         # Main layers.
         if self.architecture == 'resnet':
             y = self.skip(x, gain=np.sqrt(0.5))
@@ -610,7 +600,7 @@ class DiscriminatorBlock(torch.nn.Module):
             x = self.conv1(x)
 
         assert x.dtype == dtype
-        return x, img, pmap
+        return x, img
 
 #----------------------------------------------------------------------------
 
@@ -663,13 +653,12 @@ class DiscriminatorEpilogue(torch.nn.Module):
 
         if architecture == 'skip':
             self.fromrgb = Conv2dLayer(img_channels, in_channels, kernel_size=1, activation=activation)
-            self.frompmap = Conv2dLayer(1, in_channels, kernel_size=1, activation=activation)
         self.mbstd = MinibatchStdLayer(group_size=mbstd_group_size, num_channels=mbstd_num_channels) if mbstd_num_channels > 0 else None
         self.conv = Conv2dLayer(in_channels + mbstd_num_channels, in_channels, kernel_size=3, activation=activation, conv_clamp=conv_clamp)
         self.fc = FullyConnectedLayer(in_channels * (resolution ** 2), in_channels, activation=activation)
         self.out = FullyConnectedLayer(in_channels, 1 if cmap_dim == 0 else cmap_dim)
 
-    def forward(self, x, img, pmap, cmap, force_fp32=False):
+    def forward(self, x, img, cmap, force_fp32=False):
         misc.assert_shape(x, [None, self.in_channels, self.resolution, self.resolution]) # [NCHW]
         _ = force_fp32 # unused
         dtype = torch.float32
@@ -681,10 +670,6 @@ class DiscriminatorEpilogue(torch.nn.Module):
             misc.assert_shape(img, [None, self.img_channels, self.resolution, self.resolution])
             img = img.to(dtype=dtype, memory_format=memory_format)
             x = x + self.fromrgb(img)
-
-            misc.assert_shape(pmap, [None, 1, self.resolution, self.resolution])
-            pmap = pmap.to(dtype=dtype, memory_format=memory_format)
-            x = x + self.frompmap(pmap)
 
         # Main layers.
         if self.mbstd is not None:
@@ -704,7 +689,7 @@ class DiscriminatorEpilogue(torch.nn.Module):
 #----------------------------------------------------------------------------
 
 @persistence.persistent_class
-class Discriminator(torch.nn.Module):
+class DiscriminatorPose(torch.nn.Module):
     def __init__(self,
         c_dim,                          # Conditioning label (C) dimensionality.
         img_resolution,                 # Input resolution.
@@ -751,18 +736,132 @@ class Discriminator(torch.nn.Module):
             self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
 
-    def forward(self, img, pmap, pose, c, **block_kwargs):
+    def forward(self, img, pose, c, **block_kwargs):
         x = None
         for res in self.block_resolutions:
             block = getattr(self, f'b{res}')
             if res <=64:
                 x = torch.cat([x, pose[res]], dim=1)
-            x, img, pmap = block(x, img, pmap, **block_kwargs)
+            x, img = block(x, img, **block_kwargs)
 
         cmap = None
         if self.c_dim > 0:
             cmap = self.mapping(None, c)
-        x = self.b4(x, img, pmap, cmap)
+        x = self.b4(x, img, cmap)
         return x
 
-#----------------------------------------------------------------------------
+@persistence.persistent_class
+class DiscriminatorSeg(torch.nn.Module):
+    def __init__(self,
+        c_dim,                          # Conditioning label (C) dimensionality.
+        img_resolution,                 # Input resolution.
+        img_channels,                   # Number of input color channels.
+        architecture        = 'resnet', # Architecture: 'orig', 'skip', 'resnet'.
+        channel_base        = 32768,    # Overall multiplier for the number of channels.
+        channel_max         = 512,      # Maximum number of channels in any layer.
+        num_fp16_res        = 0,        # Use FP16 for the N highest resolutions.
+        conv_clamp          = None,     # Clamp the output of convolution layers to +-X, None = disable clamping.
+        cmap_dim            = None,     # Dimensionality of mapped conditioning label, None = default.
+        block_kwargs        = {},       # Arguments for DiscriminatorBlock.
+        mapping_kwargs      = {},       # Arguments for MappingNetwork.
+        epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
+    ):
+        super().__init__()
+        self.c_dim = c_dim
+        self.img_resolution = img_resolution
+        self.img_resolution_log2 = int(np.log2(img_resolution))
+        self.img_channels = img_channels
+        self.block_resolutions = [2 ** i for i in range(self.img_resolution_log2, 2, -1)]
+        channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
+        fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
+
+        if cmap_dim is None:
+            cmap_dim = channels_dict[4]
+        if c_dim == 0:
+            cmap_dim = 0
+
+        common_kwargs = dict(img_channels=img_channels, architecture=architecture, conv_clamp=conv_clamp)
+        cur_layer_idx = 0
+        for res in self.block_resolutions:
+            in_channels = channels_dict[res] if res < img_resolution else 0
+            tmp_channels = channels_dict[res]
+            out_channels = channels_dict[res // 2]
+            use_fp16 = (res >= fp16_resolution)
+            block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, resolution=res,
+                first_layer_idx=cur_layer_idx, use_fp16=use_fp16, **block_kwargs, **common_kwargs)
+            setattr(self, f'b{res}', block)
+            cur_layer_idx += block.num_layers
+        if c_dim > 0:
+            self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
+        self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
+
+    def forward(self, img, c, **block_kwargs):
+        x = None
+        for res in self.block_resolutions:
+            block = getattr(self, f'b{res}')
+            x, img = block(x, img, **block_kwargs)
+
+        cmap = None
+        if self.c_dim > 0:
+            cmap = self.mapping(None, c)
+        x = self.b4(x, img, cmap)
+        return x
+
+
+@persistence.persistent_class
+class Discriminator(torch.nn.Module):
+    def __init__(self,
+        c_dim,                          # Conditioning label (C) dimensionality.
+        img_resolution,                 # Input resolution.
+        img_channels,                   # Number of input color channels.
+        architecture        = 'resnet', # Architecture: 'orig', 'skip', 'resnet'.
+        channel_base        = 32768,    # Overall multiplier for the number of channels.
+        channel_max         = 512,      # Maximum number of channels in any layer.
+        num_fp16_res        = 0,        # Use FP16 for the N highest resolutions.
+        conv_clamp          = None,     # Clamp the output of convolution layers to +-X, None = disable clamping.
+        cmap_dim            = None,     # Dimensionality of mapped conditioning label, None = default.
+        block_kwargs        = {},       # Arguments for DiscriminatorBlock.
+        mapping_kwargs      = {},       # Arguments for MappingNetwork.
+        epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
+    ):
+        super().__init__()
+
+        self.pose_D = DiscriminatorPose(c_dim,
+                                        img_resolution,
+                                        img_channels,
+                                        architecture,
+                                        channel_base,
+                                        channel_max,
+                                        num_fp16_res,
+                                        conv_clamp,
+                                        cmap_dim,
+                                        block_kwargs,
+                                        mapping_kwargs,
+                                        epilogue_kwargs
+                                        )
+        
+        self.seg_D = DiscriminatorSeg(c_dim,
+                                        img_resolution,
+                                        img_channels + 1,
+                                        architecture,
+                                        channel_base,
+                                        channel_max,
+                                        num_fp16_res,
+                                        conv_clamp,
+                                        cmap_dim,
+                                        block_kwargs,
+                                        mapping_kwargs,
+                                        epilogue_kwargs
+                                        )
+
+        self.fc = FullyConnectedLayer(2, 1, activation='lrelu')
+        
+    def forward(self, img, seg, pose, c, **block_kwargs):
+        pose_x = self.pose_D(img, pose, c,  **block_kwargs)
+
+        img_seg = torch.cat([img, seg], dim=1)
+        seg_x = self.seg_D(img_seg, c,  **block_kwargs)
+
+        x = torch.cat([pose_x, seg_x], dim=1)
+        x = self.fc(x)
+        return x
