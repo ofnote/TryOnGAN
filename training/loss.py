@@ -35,6 +35,7 @@ class StyleGAN2Loss(Loss):
         self.pl_decay = pl_decay
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
+        self.pl_mean_pmap = torch.zeros([], device=device)
 
     def run_G(self, z, pose, c, sync):
         with misc.ddp_sync(self.G_mapping, sync):
@@ -80,16 +81,28 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
                 gen_img, gen_pmap, gen_ws, pose_enc = self.run_G(gen_z[:batch_size], pose[:batch_size], gen_c[:batch_size], sync=sync)
+
+                #gen_img pl
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
-                pl_pmap_noise = torch.randn_like(gen_pmap) / np.sqrt(gen_pmap.shape[2] * gen_pmap.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
-                    pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum(), (gen_pmap * pl_pmap_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
+                    pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
                 pl_lengths = pl_grads.square().sum(2).mean(1).sqrt()
                 pl_mean = self.pl_mean.lerp(pl_lengths.mean(), self.pl_decay)
                 self.pl_mean.copy_(pl_mean.detach())
                 pl_penalty = (pl_lengths - pl_mean).square()
                 training_stats.report('Loss/pl_penalty', pl_penalty)
-                loss_Gpl = pl_penalty * self.pl_weight
+
+                #gen_pmap pl
+                pl_pmap_noise = torch.randn_like(gen_pmap) / np.sqrt(gen_pmap.shape[2] * gen_pmap.shape[3])
+                with torch.autograd.profiler.record_function('pl_grads_pmap'), conv2d_gradfix.no_weight_gradients():
+                    pl_grads_pmap = torch.autograd.grad(outputs=[(gen_pmap * pl_pmap_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
+                pl_lengths_pmap = pl_grads_pmap.square().sum(2).mean(1).sqrt()
+                pl_mean_pmap = self.pl_mean_pmap.lerp(pl_lengths_pmap.mean(), self.pl_decay)
+                self.pl_mean_pmap.copy_(pl_mean_pmap.detach())
+                pl_penalty_pmap = (pl_lengths_pmap - pl_mean_pmap).square()
+                training_stats.report('Loss/pl_penalty_pmap', pl_penalty_pmap)
+
+                loss_Gpl = (pl_penalty + pl_penalty_pmap) * self.pl_weight
                 training_stats.report('Loss/G/reg', loss_Gpl)
             with torch.autograd.profiler.record_function('Gpl_backward'):
                 (gen_img[:, 0, 0, 0] * 0 + gen_pmap[:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
@@ -128,10 +141,17 @@ class StyleGAN2Loss(Loss):
 
                 loss_Dr1 = 0
                 if do_Dr1:
+                    #real_imgs_r1
                     with torch.autograd.profiler.record_function('r1_grads'), conv2d_gradfix.no_weight_gradients():
-                        r1_grads = torch.autograd.grad(outputs=[real_logits.sum()], inputs=[real_img_tmp, real_pmap_tmp], create_graph=True, only_inputs=True)[0]
+                        r1_grads = torch.autograd.grad(outputs=[real_logits.sum()], inputs=[real_img_tmp], create_graph=True, only_inputs=True)[0]
                     r1_penalty = r1_grads.square().sum([1,2,3])
-                    loss_Dr1 = r1_penalty * (self.r1_gamma / 2)
+
+                    #real_pmap_r1
+                    with torch.autograd.profiler.record_function('r1_grads_pmap'), conv2d_gradfix.no_weight_gradients():
+                        r1_grads_pmap = torch.autograd.grad(outputs=[real_logits.sum()], inputs=[real_pmap_tmp], create_graph=True, only_inputs=True)[0]
+                    r1_penalty_pmap = r1_grads_pmap.square().sum([1,2,3])
+
+                    loss_Dr1 = (r1_penalty + r1_penalty_pmap) * (self.r1_gamma / 2)
                     training_stats.report('Loss/r1_penalty', r1_penalty)
                     training_stats.report('Loss/D/reg', loss_Dr1)
 
