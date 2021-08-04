@@ -372,7 +372,6 @@ class SynthesisBlock(torch.nn.Module):
 
             self.topmap = ToRGBLayer(out_channels, 1, w_dim=w_dim,
                 conv_clamp=conv_clamp, channels_last=self.channels_last)
-            self.num_torgb += 1
 
         if in_channels != 0 and architecture == 'resnet':
             self.skip = Conv2dLayer(in_channels, out_channels, kernel_size=1, bias=False, up=2,
@@ -413,11 +412,12 @@ class SynthesisBlock(torch.nn.Module):
             pmap = upfirdn2d.upsample2d(pmap, self.resample_filter)
 
         if self.is_last or self.architecture == 'skip':
-            y = self.torgb(x, next(w_iter), fused_modconv=fused_modconv)
+            w_tmp = next(w_iter)
+            y = self.torgb(x, w_tmp, fused_modconv=fused_modconv)
             y = y.to(dtype=torch.float32, memory_format=torch.contiguous_format)
             img = img.add_(y) if img is not None else y
 
-            ypmap = self.topmap(x, next(w_iter), fused_modconv=fused_modconv)
+            ypmap = self.topmap(x, w_tmp.clone().detach(), fused_modconv=fused_modconv)
             ypmap = ypmap.to(dtype=torch.float32, memory_format=torch.contiguous_format)
             pmap = pmap.add_(ypmap) if pmap is not None else ypmap
 
