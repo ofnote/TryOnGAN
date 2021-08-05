@@ -862,6 +862,6 @@ class Discriminator(torch.nn.Module):
         img_seg = torch.cat([img, seg], dim=1)
         seg_x = self.seg_D(img_seg, c,  **block_kwargs)
 
-        x = torch.cat([pose_x, seg_x], dim=1)
-        x = self.fc(x)
-        return x
+        #x = torch.cat([pose_x, seg_x], dim=1)
+        #x = self.fc(x)
+        return pose_x + seg_x

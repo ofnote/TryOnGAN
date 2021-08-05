@@ -361,8 +361,10 @@ def training_loop(
 
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-            images = torch.cat([G_ema(z=z, c=c, pose=pose, noise_mode='const').cpu() for z, c, pose in zip(grid_z, grid_c, grid_pose)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
+                images = torch.cat([G_ema(z=z, c=c, pose=pose, ret_pose=True, noise_mode='const')[0].cpu() for z, c, pose in zip(grid_z, grid_c, grid_pose)]).numpy()
+                pmaps = torch.cat([G_ema(z=z, c=c, pose=pose, ret_pose=True, noise_mode='const')[1].cpu() for z, c, pose in zip(grid_z, grid_c, grid_pose)]).numpy()
+                save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
+                save_image_grid(pmaps, os.path.join(run_dir, f'pmapfakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
 
         # Save network snapshot.
         snapshot_pkl = None
