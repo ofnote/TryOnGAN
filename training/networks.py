@@ -785,6 +785,9 @@ class DiscriminatorSeg(torch.nn.Module):
         for res in self.block_resolutions:
             in_channels = channels_dict[res] if res < img_resolution else 0
             tmp_channels = channels_dict[res]
+            if res <= 64:
+                in_channels = 2*in_channels
+                tmp_channels = 2*tmp_channels
             out_channels = channels_dict[res // 2]
             use_fp16 = (res >= fp16_resolution)
             block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, resolution=res,
@@ -840,7 +843,7 @@ class Discriminator(torch.nn.Module):
                                         epilogue_kwargs
                                         )
         
-        self.seg_D = DiscriminatorSeg(c_dim,
+        self.seg_D = DiscriminatorPose(c_dim,
                                         img_resolution,
                                         img_channels + 1,
                                         architecture,
@@ -857,11 +860,11 @@ class Discriminator(torch.nn.Module):
         self.fc = FullyConnectedLayer(2, 1, activation='lrelu')
         
     def forward(self, img, seg, pose, c, **block_kwargs):
-        pose_x = self.pose_D(img, pose, c,  **block_kwargs)
+        #pose_x = self.pose_D(img, pose, c,  **block_kwargs)
 
         img_seg = torch.cat([img, seg], dim=1)
-        seg_x = self.seg_D(img_seg, c,  **block_kwargs)
+        seg_x = self.seg_D(img_seg, pose, c,  **block_kwargs)
 
         #x = torch.cat([pose_x, seg_x], dim=1)
         #x = self.fc(x)
-        return pose_x + seg_x
+        return seg_x
