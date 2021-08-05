@@ -35,7 +35,6 @@ class StyleGAN2Loss(Loss):
         self.pl_decay = pl_decay
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
-        self.pl_mean_pmap = torch.zeros([], device=device)
 
     def run_G(self, z, pose, c, sync):
         with misc.ddp_sync(self.G_mapping, sync):
@@ -84,8 +83,12 @@ class StyleGAN2Loss(Loss):
 
                 #gen_img pl
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
+                pmap_pl_noise = torch.randn_like(gen_pmap) / np.sqrt(gen_pmap.shape[2] * gen_pmap.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
-                    pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
+                    pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum(), (gen_pmap * pmap_pl_noise).sum()],
+                                                   inputs=[gen_ws],
+                                                   create_graph=True,
+                                                   only_inputs=True)[0]
                 pl_lengths = pl_grads.square().sum(2).mean(1).sqrt()
                 pl_mean = self.pl_mean.lerp(pl_lengths.mean(), self.pl_decay)
                 self.pl_mean.copy_(pl_mean.detach())
@@ -133,7 +136,7 @@ class StyleGAN2Loss(Loss):
                 if do_Dr1:
                     #real_imgs_r1
                     with torch.autograd.profiler.record_function('r1_grads'), conv2d_gradfix.no_weight_gradients():
-                        r1_grads = torch.autograd.grad(outputs=[real_logits.sum()], inputs=[real_img_tmp], create_graph=True, only_inputs=True)[0]
+                        r1_grads = torch.autograd.grad(outputs=[real_logits.sum()], inputs=[real_img_tmp, real_pmap_tmp], create_graph=True, only_inputs=True)[0]
                     r1_penalty = r1_grads.square().sum([1,2,3])
 
                     loss_Dr1 = r1_penalty * (self.r1_gamma / 2)

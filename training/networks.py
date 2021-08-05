@@ -417,7 +417,7 @@ class SynthesisBlock(torch.nn.Module):
             y = y.to(dtype=torch.float32, memory_format=torch.contiguous_format)
             img = img.add_(y) if img is not None else y
 
-            ypmap = self.topmap(x, w_tmp.clone().detach(), fused_modconv=fused_modconv)
+            ypmap = self.topmap(x, w_tmp, fused_modconv=fused_modconv)
             ypmap = ypmap.to(dtype=torch.float32, memory_format=torch.contiguous_format)
             pmap = pmap.add_(ypmap) if pmap is not None else ypmap
 
