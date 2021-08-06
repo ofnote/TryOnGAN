@@ -370,14 +370,11 @@ class SynthesisBlock(torch.nn.Module):
                 conv_clamp=conv_clamp, channels_last=self.channels_last)
             self.num_torgb += 1
 
-            self.topmap = ToRGBLayer(out_channels, 1, w_dim=w_dim,
-                conv_clamp=conv_clamp, channels_last=self.channels_last)
-
         if in_channels != 0 and architecture == 'resnet':
             self.skip = Conv2dLayer(in_channels, out_channels, kernel_size=1, bias=False, up=2,
                 resample_filter=resample_filter, channels_last=self.channels_last)
 
-    def forward(self, x, img, pmap, ws, force_fp32=False, fused_modconv=None, **layer_kwargs):
+    def forward(self, x, img, ws, force_fp32=False, fused_modconv=None, **layer_kwargs):
         misc.assert_shape(ws, [None, self.num_conv + self.num_torgb, self.w_dim])
         w_iter = iter(ws.unbind(dim=1))
         dtype = torch.float16 if self.use_fp16 and not force_fp32 else torch.float32
@@ -408,24 +405,16 @@ class SynthesisBlock(torch.nn.Module):
             misc.assert_shape(img, [None, self.img_channels, self.resolution // 2, self.resolution // 2])
             img = upfirdn2d.upsample2d(img, self.resample_filter)
 
-            misc.assert_shape(pmap, [None, 1, self.resolution // 2, self.resolution // 2])
-            pmap = upfirdn2d.upsample2d(pmap, self.resample_filter)
-
         if self.is_last or self.architecture == 'skip':
             w_tmp = next(w_iter)
             y = self.torgb(x, w_tmp, fused_modconv=fused_modconv)
             y = y.to(dtype=torch.float32, memory_format=torch.contiguous_format)
             img = img.add_(y) if img is not None else y
 
-            ypmap = self.topmap(x, w_tmp, fused_modconv=fused_modconv)
-            ypmap = ypmap.to(dtype=torch.float32, memory_format=torch.contiguous_format)
-            pmap = pmap.add_(ypmap) if pmap is not None else ypmap
-
         assert x.dtype == dtype
         assert img is None or img.dtype == torch.float32
-        assert pmap is None or pmap.dtype == torch.float32
 
-        return x, img, pmap
+        return x, img
 
 #----------------------------------------------------------------------------
 
@@ -461,10 +450,16 @@ class SynthesisNetwork(torch.nn.Module):
             is_last = (res == self.img_resolution)
             block = SynthesisBlock(in_channels, out_channels, w_dim=w_dim, resolution=res,
                 img_channels=img_channels, is_last=is_last, use_fp16=use_fp16, **block_kwargs)
+            
+            pmap_block = SynthesisBlock(in_channels, out_channels, w_dim=w_dim, resolution=res,
+                img_channels=1, is_last=is_last, use_fp16=use_fp16, **block_kwargs)
+
             self.num_ws += block.num_conv
             if is_last:
                 self.num_ws += block.num_torgb
             setattr(self, f'b{res}', block)
+            setattr(self, f'pb{res}', pmap_block)
+
 
     def forward(self, ws, pose, ret_pose=True, **block_kwargs):
         block_ws = []
@@ -477,18 +472,26 @@ class SynthesisNetwork(torch.nn.Module):
                 block_ws.append(ws.narrow(1, w_idx, block.num_conv + block.num_torgb))
                 w_idx += block.num_conv
 
-        x = img = pmap = None
+        x = img =  None
+        x_pmap = pmap = None
         pose_enc = self.P(pose)
         x = pose_enc[4]
+        x_pmap = pose_enc[4]
         for res, cur_ws in zip(self.block_resolutions, block_ws):
             block = getattr(self, f'b{res}')
-            x, img, pmap = block(x, img, pmap, cur_ws, **block_kwargs)
+            x, img = block(x, img, cur_ws, **block_kwargs)
+
+            pmap_block = getattr(self, f'pb{res}')
+            x_pmap, pmap = pmap_block(x_pmap, pmap, cur_ws, **block_kwargs)
+
             if res <= 64:
                 x = torch.cat([x, pose_enc[res]], dim=1)
+                x_pmap = torch.cat([x_pmap, pose_enc[res]], dim=1)
         
         if ret_pose:
             return img, pmap, pose_enc
         return img
+
 
 #----------------------------------------------------------------------------
 
