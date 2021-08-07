@@ -846,7 +846,7 @@ class Discriminator(torch.nn.Module):
                                         epilogue_kwargs
                                         )
         
-        self.seg_D = DiscriminatorPose(c_dim,
+        self.seg_D = DiscriminatorSeg(c_dim,
                                         img_resolution,
                                         img_channels + 1,
                                         architecture,
@@ -863,11 +863,11 @@ class Discriminator(torch.nn.Module):
         self.fc = FullyConnectedLayer(2, 1, activation='lrelu')
         
     def forward(self, img, seg, pose, c, **block_kwargs):
-        #pose_x = self.pose_D(img, pose, c,  **block_kwargs)
+        pose_x = self.pose_D(img, pose, c,  **block_kwargs)
 
         img_seg = torch.cat([img, seg], dim=1)
-        seg_x = self.seg_D(img_seg, pose, c,  **block_kwargs)
+        seg_x = self.seg_D(img_seg, c,  **block_kwargs)
 
         #x = torch.cat([pose_x, seg_x], dim=1)
         #x = self.fc(x)
-        return seg_x
+        return pose_x + seg_x
