@@ -788,9 +788,6 @@ class DiscriminatorSeg(torch.nn.Module):
         for res in self.block_resolutions:
             in_channels = channels_dict[res] if res < img_resolution else 0
             tmp_channels = channels_dict[res]
-            if res <= 64:
-                in_channels = 2*in_channels
-                tmp_channels = 2*tmp_channels
             out_channels = channels_dict[res // 2]
             use_fp16 = (res >= fp16_resolution)
             block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, resolution=res,
