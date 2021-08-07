@@ -356,6 +356,9 @@ class SynthesisBlock(torch.nn.Module):
         self.num_conv = 0
         self.num_torgb = 0
 
+        if in_channels == 0:
+            self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution]))
+
         if in_channels != 0:
             self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
                 resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last, **layer_kwargs)
@@ -384,6 +387,10 @@ class SynthesisBlock(torch.nn.Module):
                 fused_modconv = (not self.training) and (dtype == torch.float32 or int(x.shape[0]) == 1)
 
         # Input.
+        if x is None and self.in_channels == 0:
+            x = self.const.to(dtype=dtype, memory_format=memory_format)
+            x = x.unsqueeze(0).repeat([ws.shape[0], 1, 1, 1])
+
         if self.in_channels != 0:
             misc.assert_shape(x, [None, self.in_channels, self.resolution // 2, self.resolution // 2])
             x = x.to(dtype=dtype, memory_format=memory_format)
@@ -443,12 +450,13 @@ class SynthesisNetwork(torch.nn.Module):
         self.num_ws = 0
         for res in self.block_resolutions:
             in_channels = channels_dict[res // 2] if res > 4 else 0
+            rgb_in_channels = in_channels
             if res <=128:
-                in_channels = in_channels*2
+                rgb_in_channels = 2*in_channels
             out_channels = channels_dict[res]
             use_fp16 = (res >= fp16_resolution)
             is_last = (res == self.img_resolution)
-            block = SynthesisBlock(in_channels, out_channels, w_dim=w_dim, resolution=res,
+            block = SynthesisBlock(rgb_in_channels, out_channels, w_dim=w_dim, resolution=res,
                 img_channels=img_channels, is_last=is_last, use_fp16=use_fp16, **block_kwargs)
             
             pmap_block = SynthesisBlock(in_channels, out_channels, w_dim=w_dim, resolution=res,
@@ -476,7 +484,6 @@ class SynthesisNetwork(torch.nn.Module):
         x_pmap = pmap = None
         pose_enc = self.P(pose)
         x = pose_enc[4]
-        x_pmap = pose_enc[4]
         for res, cur_ws in zip(self.block_resolutions, block_ws):
             block = getattr(self, f'b{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
@@ -486,7 +493,6 @@ class SynthesisNetwork(torch.nn.Module):
 
             if res <= 64:
                 x = torch.cat([x, pose_enc[res]], dim=1)
-                x_pmap = torch.cat([x_pmap, pose_enc[res]], dim=1)
         
         if ret_pose:
             return img, pmap, pose_enc
