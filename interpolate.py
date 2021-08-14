@@ -69,7 +69,6 @@ def getGaussianHeatMap(bonePos):
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--projected-w1', help='Projection result file', type=str, metavar='FILE')
 @click.option('--projected-w2', help='Projection result file', type=str, metavar='FILE')
-@click.option('--num-intermediate','num_intermediate', help='num of samples', type=int)
 @click.option('--posefile', help='csv file with pose keypoints', type=str, metavar='FILE')
 @click.option('--poselabel', help='poselabel', type=str)
 @click.option('--outdir', help='Where to save the output images', type=str, required=True, metavar='DIR')
@@ -82,7 +81,6 @@ def interpolate_latents(
     outdir: str,
     projected_w1: Optional[str],
     projected_w2: Optional[str],
-    num_intermediate,
     posefile,
     poselabel,
     imagesize
@@ -143,10 +141,12 @@ def interpolate_latents(
             else:
                 print("Provide label for the pose in csv file provided")
 
+        num_intermediate = 100
         wlist = np.linspace(ws1, ws2, num_intermediate)
         ws = torch.tensor(wlist, device=device) # pylint: disable=not-callable
         video = imageio.get_writer(f'{outdir}/interp.mp4', mode='I', fps=10, codec='libx264', bitrate='16M')
         assert ws.shape[1:] == (G.num_ws, G.w_dim)
+        imgs = []
         for idx, w in enumerate(ws):
             if pose is None:
                 img = G.synthesis(w.unsqueeze(0), noise_mode=noise_mode)
@@ -155,8 +155,12 @@ def interpolate_latents(
 
             img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
             img = img[0].cpu().numpy()
-            imgsaved = PIL.Image.fromarray(img, 'RGB').save(f'{outdir}/interp{idx:02d}.png')
+            if idx % 25 == 0:
+                imgs.append(img[:, 40:216, :])
+
             video.append_data(img)
+        imgs.append(img[:, 40:216, :])
+        imgsaved = PIL.Image.fromarray(np.concatenate(imgs, axis=1), 'RGB').save(f'{outdir}/interp.png')
         video.close()
         return
 
