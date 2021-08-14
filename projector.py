@@ -15,16 +15,19 @@ from time import perf_counter
 import click
 import imageio
 import numpy as np
+import pandas as pd
 import PIL.Image
 import torch
 import torch.nn.functional as F
 
 import dnnlib
 import legacy
+from scipy.stats import multivariate_normal
 
 def project(
     G,
     target: torch.Tensor, # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
+    pose,
     *,
     num_steps                  = 1000,
     w_avg_samples              = 10000,
@@ -63,6 +66,7 @@ def project(
 
     # Features for target image.
     target_images = target.unsqueeze(0).to(device).to(torch.float32)
+    pose = pose.unsqueeze(0).to(device).to(torch.float32)
     if target_images.shape[2] > 256:
         target_images = F.interpolate(target_images, size=(256, 256), mode='area')
     target_features = vgg16(target_images, resize_images=False, return_lpips=True)
@@ -90,7 +94,7 @@ def project(
         # Synth images from opt_w.
         w_noise = torch.randn_like(w_opt) * w_noise_scale
         ws = (w_opt + w_noise).repeat([1, G.mapping.num_ws, 1])
-        synth_images = G.synthesis(ws, noise_mode='const')
+        synth_images = G.synthesis(ws, pose, ret_pose=False, noise_mode='const')
 
         # Downsample image to 256x256 if it's larger than that. VGG was built for 224x224 images.
         synth_images = (synth_images + 1) * (255/2)
@@ -131,10 +135,55 @@ def project(
     return w_out.repeat([1, G.mapping.num_ws, 1])
 
 #----------------------------------------------------------------------------
+def get_pose(filename, df, image_size):
+    base = os.path.basename(filename)
+    keypoint = df[df['name'] == base]['keypoints'].tolist()
+    if len(keypoint) > 0:
+        keypoint = keypoint[0]
+        ptlist = keypoint.split(':')
+        ptlist = [float(x) for x in ptlist]
+        maps = getHeatMap(ptlist, image_size)
+    else:
+        maps = torch.zeros(17, 64, 64)
+    return maps.float()
+
+def getHeatMap(pose, image_size):
+    '''
+    pose should be a list of length 51, every 3 number for
+    x, y and confidence for each of the 17 keypoints.
+    '''
+
+    stack = []
+    for i in range(17):
+        x = pose[3*i]
+        
+        y = pose[3*i + 1]
+        c = pose[3*i + 2]
+        
+        ratio = 64.0 / image_size
+        map = getGaussianHeatMap([x*ratio, y*ratio])
+
+        if c < 0.4:
+            map = 0.0 * map
+        stack.append(map)
+    
+    maps = np.dstack(stack)
+    heatmap = torch.from_numpy(maps).transpose(0, -1)
+    return heatmap
+
+def getGaussianHeatMap(bonePos):
+    width = 64
+    x, y = np.mgrid[0:width:1, 0:width:1]
+    pos = np.dstack((x, y))
+
+    gau = multivariate_normal(mean = list(bonePos), cov = [[width*0.02, 0.0], [0.0, width*0.02]]).pdf(pos)
+    return gau
+
 
 @click.command()
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--target', 'target_fname', help='Target image file to project to', required=True, metavar='FILE')
+@click.option('--posefile', 'pose_fname', help='pose-file', required=True, metavar='FILE')
 @click.option('--num-steps',              help='Number of optimization steps', type=int, default=1000, show_default=True)
 @click.option('--seed',                   help='Random seed', type=int, default=303, show_default=True)
 @click.option('--save-video',             help='Save an mp4 video of optimization progress', type=bool, default=True, show_default=True)
@@ -142,15 +191,14 @@ def project(
 def run_projection(
     network_pkl: str,
     target_fname: str,
+    pose_fname:str,
     outdir: str,
     save_video: bool,
     seed: int,
     num_steps: int
 ):
     """Project given image to the latent space of pretrained network pickle.
-
     Examples:
-
     \b
     python projector.py --outdir=out --target=~/mytargetimg.png \\
         --network=https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/ffhq.pkl
@@ -172,11 +220,14 @@ def run_projection(
     target_pil = target_pil.resize((G.img_resolution, G.img_resolution), PIL.Image.LANCZOS)
     target_uint8 = np.array(target_pil, dtype=np.uint8)
 
+    df = pd.read_csv(pose_fname)
+    phase_pose = get_pose(target_fname, df, G.img_resolution)
     # Optimize projection.
     start_time = perf_counter()
     projected_w_steps = project(
         G,
         target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device), # pylint: disable=not-callable
+        pose=phase_pose,
         num_steps=num_steps,
         device=device,
         verbose=True
@@ -189,7 +240,7 @@ def run_projection(
         video = imageio.get_writer(f'{outdir}/proj.mp4', mode='I', fps=10, codec='libx264', bitrate='16M')
         print (f'Saving optimization progress video "{outdir}/proj.mp4"')
         for projected_w in projected_w_steps:
-            synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
+            synth_image = G.synthesis(projected_w.unsqueeze(0), phase_pose.unsqueeze(0).to(device), ret_pose=False, noise_mode='const')
             synth_image = (synth_image + 1) * (255/2)
             synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
             video.append_data(np.concatenate([target_uint8, synth_image], axis=1))
@@ -198,7 +249,7 @@ def run_projection(
     # Save final projected frame and W vector.
     target_pil.save(f'{outdir}/target.png')
     projected_w = projected_w_steps[-1]
-    synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
+    synth_image = G.synthesis(projected_w.unsqueeze(0), phase_pose.unsqueeze(0).to(device), ret_pose=False, noise_mode='const')
     synth_image = (synth_image + 1) * (255/2)
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
     PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj.png')
