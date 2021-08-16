@@ -165,7 +165,8 @@ def interpolate_latents(
         imgsxy = [imgsx]
         if mix:
             wmix1 = copy.deepcopy(ws2)
-            wmix1[0:6] = torch.tensor(ws1[0:6], device=device)
+            wmix1[0:6] = ws1[0:6]
+            wmix1 = torch.tensor(wmix1, device=device)
             if pose is None:
                 img = G.synthesis(wmix1.unsqueeze(0), noise_mode=noise_mode)
             else:
@@ -178,7 +179,8 @@ def interpolate_latents(
             imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/src->tgt.png')
         
             wmix2 = copy.deepcopy(ws1)
-            wmix2[0:6] = torch.tensor(ws2[0:6], device=device)
+            wmix2[0:6] = ws2[0:6]
+            wmix2 = torch.tensor(wmix2, device=device)
             if pose is None:
                 img = G.synthesis(wmix2.unsqueeze(0), noise_mode=noise_mode)
             else:
@@ -203,7 +205,7 @@ def interpolate_latents(
             wmix4l = []
             for row_seed in row_seeds:
                 wmix3 = w_dict[row_seed].clone()
-                wmix3[0:6] = ws1[0:6]
+                wmix3[0:6] = torch.tensor(ws1[0:6], device=device)
                 if pose is None:
                     image = G.synthesis(wmix3[np.newaxis], noise_mode=noise_mode)
                 else:
@@ -215,7 +217,7 @@ def interpolate_latents(
                 wmix3l.append(img)
 
                 wmix4 = w_dict[row_seed].clone()
-                wmix4[0:6] = ws2[0:6]
+                wmix4[0:6] = torch.tensor(ws2[0:6], device=device)
                 if pose is None:
                     image = G.synthesis(wmix4[np.newaxis], noise_mode=noise_mode)
                 else:
