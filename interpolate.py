@@ -163,36 +163,65 @@ def interpolate_latents(
         video.close()
         
         imgsxy = [imgsx]
-        ws2list = []
         if mix:
-            for i in range(6):
-                wstemp = copy.deepcopy(ws2)
-                wstemp[0: 2*(i+1),:] = ws1[0: 2*(i+1),:]
-                ws2list.append(wstemp)
-        
-        for ws2i in ws2list:
-            wlist = np.linspace(ws1, ws2i, num_intermediate)
-            ws = torch.tensor(wlist, device=device) # pylint: disable=not-callable
-            assert ws.shape[1:] == (G.num_ws, G.w_dim)
-            imgs = []
-            for idx, w in enumerate(ws):
-                if pose is None:
-                    img = G.synthesis(w.unsqueeze(0), truncation_psi=truncation_psi, noise_mode=noise_mode)
-                else:
-                    img = G.synthesis(w.unsqueeze(0), pose.unsqueeze(0), truncation_psi=truncation_psi, ret_pose=False, noise_mode=noise_mode)
+            wmix1 = copy.deepcopy(ws2)
+            wmix1[0:6] = ws1[0:6]
+            if pose is None:
+                img = G.synthesis(wmix1.unsqueeze(0), noise_mode=noise_mode)
+            else:
+                img = G.synthesis(wmix1.unsqueeze(0), pose.unsqueeze(0), ret_pose=False, noise_mode=noise_mode)
 
-                img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-                img = img[0].cpu().numpy()
-                if idx % 25 == 0:
-                    imgs.append(img[:, 40:216, :])
+            img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            img = img[0].cpu().numpy()
+            img = img[:, 40:216, :]
+            imgsx = np.concatenate([imgs[0], img, imgs[-1]], axis=1)
+            imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/src->tgt.png')
+        
+            wmix2 = copy.deepcopy(ws1)
+            wmix2[0:6] = ws2[0:6]
+            if pose is None:
+                img = G.synthesis(wmix2.unsqueeze(0), noise_mode=noise_mode)
+            else:
+                img = G.synthesis(wmix2.unsqueeze(0), pose.unsqueeze(0), ret_pose=False, noise_mode=noise_mode)
 
-            imgs.append(img[:, 40:216, :])
-            imgsx = np.concatenate(imgs, axis=1)
-            imgsxy.append(imgsx)
-        
-        imgsMatrix = np.concatenate(imgsxy, axis=0)
-        imgsaved = PIL.Image.fromarray(imgsMatrix, 'RGB').save(f'{outdir}/mixedInterp.png')
-        
+            img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            img = img[0].cpu().numpy()
+            img = img[:, 40:216, :]
+            imgsx = np.concatenate([imgs[0], img, imgs[-1]], axis=1)
+            imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/tgt->src.png')
+
+            row_seeds=[100,200,250,356]
+            all_seeds = list(set(row_seeds))
+            all_z = np.stack([np.random.RandomState(seed).randn(G.z_dim) for seed in all_seeds])
+            all_w = G.mapping(torch.from_numpy(all_z).to(device), None)
+            w_avg = G.mapping.w_avg
+            all_w = w_avg + (all_w - w_avg) * truncation_psi
+            w_dict = {seed: w for seed, w in zip(all_seeds, list(all_w))}
+
+            print('Generating style-mixed images...')
+            wmix3l = []
+            wmix4l = []
+            for row_seed in row_seeds:
+                wmix3 = w_dict[row_seed].clone()
+                wmix3[0:6] = ws1[0:6]
+                image = G.synthesis(wmix3[np.newaxis], noise_mode=noise_mode)
+                image = (image.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+                img = image[0].cpu().numpy()
+                wmix3l.append(img)
+
+                wmix4 = w_dict[row_seed].clone()
+                wmix4[0:6] = ws2[0:6]
+                image = G.synthesis(wmix4[np.newaxis], noise_mode=noise_mode)
+                image = (image.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+                img = image[0].cpu().numpy()
+                wmix4l.append(img)
+
+            imgsx = np.concatenate(wmix3l, axis=1)
+            imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/srcmix.png')
+
+            imgsx = np.concatenate(wmix4l, axis=1)
+            imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/tgtmix.png')
+            
         return
 
 
