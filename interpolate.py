@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import PIL.Image
 import torch
+import copy
 
 import legacy
 from scipy.stats import multivariate_normal
@@ -65,7 +66,7 @@ def getGaussianHeatMap(bonePos):
 @click.command()
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
-@click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
+@click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=0.75, show_default=True)
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--projected-w1', help='Projection result file', type=str, metavar='FILE')
 @click.option('--projected-w2', help='Projection result file', type=str, metavar='FILE')
@@ -73,6 +74,7 @@ def getGaussianHeatMap(bonePos):
 @click.option('--poselabel', help='poselabel', type=str)
 @click.option('--outdir', help='Where to save the output images', type=str, required=True, metavar='DIR')
 @click.option('--imagesize', help='size', type=int)
+@click.option('--mix', help='mix', type=bool, default=False)
 def interpolate_latents(
     ctx: click.Context,
     network_pkl: str,
@@ -83,27 +85,23 @@ def interpolate_latents(
     projected_w2: Optional[str],
     posefile,
     poselabel,
-    imagesize
+    imagesize,
+    mix
 ):
     """Generate images using pretrained network pickle.
-
     Examples:
-
     \b
     # Generate curated MetFaces images without truncation (Fig.10 left)
     python generate.py --outdir=out --trunc=1 --seeds=85,265,297,849 \\
         --network=https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metfaces.pkl
-
     \b
     # Generate uncurated MetFaces images with truncation (Fig.12 upper left)
     python generate.py --outdir=out --trunc=0.7 --seeds=600-605 \\
         --network=https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metfaces.pkl
-
     \b
     # Generate class conditional CIFAR-10 images (Fig.17 left, Car)
     python generate.py --outdir=out --seeds=0-35 --class=1 \\
         --network=https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/cifar10.pkl
-
     \b
     # Render an image from projected W
     python generate.py --outdir=out --projected_w=projected_w.npz \\
@@ -160,8 +158,80 @@ def interpolate_latents(
 
             video.append_data(img)
         imgs.append(img[:, 40:216, :])
-        imgsaved = PIL.Image.fromarray(np.concatenate(imgs, axis=1), 'RGB').save(f'{outdir}/interp.png')
+        imgsx = np.concatenate(imgs, axis=1)
+        imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/interp.png')
         video.close()
+        
+        imgsxy = [imgsx]
+        if mix:
+            wmix1 = copy.deepcopy(ws2)
+            wmix1[0:6] = torch.tensor(ws1[0:6], device=device)
+            if pose is None:
+                img = G.synthesis(wmix1.unsqueeze(0), noise_mode=noise_mode)
+            else:
+                img = G.synthesis(wmix1.unsqueeze(0), pose.unsqueeze(0), ret_pose=False, noise_mode=noise_mode)
+
+            img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            img = img[0].cpu().numpy()
+            img = img[:, 40:216, :]
+            imgsx = np.concatenate([imgs[0], img, imgs[-1]], axis=1)
+            imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/src->tgt.png')
+        
+            wmix2 = copy.deepcopy(ws1)
+            wmix2[0:6] = torch.tensor(ws2[0:6], device=device)
+            if pose is None:
+                img = G.synthesis(wmix2.unsqueeze(0), noise_mode=noise_mode)
+            else:
+                img = G.synthesis(wmix2.unsqueeze(0), pose.unsqueeze(0), ret_pose=False, noise_mode=noise_mode)
+
+            img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            img = img[0].cpu().numpy()
+            img = img[:, 40:216, :]
+            imgsx = np.concatenate([imgs[0], img, imgs[-1]], axis=1)
+            imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/tgt->src.png')
+
+            row_seeds=[100,200,250,356]
+            all_seeds = list(set(row_seeds))
+            all_z = np.stack([np.random.RandomState(seed).randn(G.z_dim) for seed in all_seeds])
+            all_w = G.mapping(torch.from_numpy(all_z).to(device), None)
+            w_avg = G.mapping.w_avg
+            all_w = w_avg + (all_w - w_avg) * truncation_psi
+            w_dict = {seed: w for seed, w in zip(all_seeds, list(all_w))}
+
+            print('Generating style-mixed images...')
+            wmix3l = []
+            wmix4l = []
+            for row_seed in row_seeds:
+                wmix3 = w_dict[row_seed].clone()
+                wmix3[0:6] = ws1[0:6]
+                if pose is None:
+                    image = G.synthesis(wmix3[np.newaxis], noise_mode=noise_mode)
+                else:
+                    image = G.synthesis(wmix3[np.newaxis], pose.unsqueeze(0), ret_pose=False, noise_mode=noise_mode)
+
+                image = (image.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+                img = image[0].cpu().numpy()
+                img = img[:, 40:216, :]
+                wmix3l.append(img)
+
+                wmix4 = w_dict[row_seed].clone()
+                wmix4[0:6] = ws2[0:6]
+                if pose is None:
+                    image = G.synthesis(wmix4[np.newaxis], noise_mode=noise_mode)
+                else:
+                    image = G.synthesis(wmix4[np.newaxis], pose.unsqueeze(0), ret_pose=False, noise_mode=noise_mode)
+
+                image = (image.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+                img = image[0].cpu().numpy()
+                img = img[:, 40:216, :]
+                wmix4l.append(img)
+
+            imgsx = np.concatenate(wmix3l, axis=1)
+            imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/srcmix.png')
+
+            imgsx = np.concatenate(wmix4l, axis=1)
+            imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/tgtmix.png')
+            
         return
 
 
