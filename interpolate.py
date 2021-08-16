@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import PIL.Image
 import torch
+import copy
 
 import legacy
 from scipy.stats import multivariate_normal
@@ -65,7 +66,7 @@ def getGaussianHeatMap(bonePos):
 @click.command()
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
-@click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
+@click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=0.75, show_default=True)
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--projected-w1', help='Projection result file', type=str, metavar='FILE')
 @click.option('--projected-w2', help='Projection result file', type=str, metavar='FILE')
@@ -73,6 +74,7 @@ def getGaussianHeatMap(bonePos):
 @click.option('--poselabel', help='poselabel', type=str)
 @click.option('--outdir', help='Where to save the output images', type=str, required=True, metavar='DIR')
 @click.option('--imagesize', help='size', type=int)
+@click.option('--mix', help='mix', type=bool, default=False)
 def interpolate_latents(
     ctx: click.Context,
     network_pkl: str,
@@ -83,7 +85,8 @@ def interpolate_latents(
     projected_w2: Optional[str],
     posefile,
     poselabel,
-    imagesize
+    imagesize,
+    mix
 ):
     """Generate images using pretrained network pickle.
     Examples:
@@ -155,8 +158,41 @@ def interpolate_latents(
 
             video.append_data(img)
         imgs.append(img[:, 40:216, :])
-        imgsaved = PIL.Image.fromarray(np.concatenate(imgs, axis=1), 'RGB').save(f'{outdir}/interp.png')
+        imgsx = np.concatenate(imgs, axis=1)
+        imgsaved = PIL.Image.fromarray(imgsx, 'RGB').save(f'{outdir}/interp.png')
         video.close()
+        
+        imgsxy = [imgsx]
+        ws2list = []
+        if mix:
+            for i in range(6):
+                wstemp = copy.deepcopy(ws2)
+                wstemp[0: 2*(i+1),:] = ws1[0: 2*(i+1),:]
+                ws2list.append(wstemp)
+        
+        for ws2i in ws2list:
+            wlist = np.linspace(ws1, ws2i, num_intermediate)
+            ws = torch.tensor(wlist, device=device) # pylint: disable=not-callable
+            assert ws.shape[1:] == (G.num_ws, G.w_dim)
+            imgs = []
+            for idx, w in enumerate(ws):
+                if pose is None:
+                    img = G.synthesis(w.unsqueeze(0), truncation_psi=truncation_psi, noise_mode=noise_mode)
+                else:
+                    img = G.synthesis(w.unsqueeze(0), pose.unsqueeze(0), truncation_psi=truncation_psi, ret_pose=False, noise_mode=noise_mode)
+
+                img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+                img = img[0].cpu().numpy()
+                if idx % 25 == 0:
+                    imgs.append(img[:, 40:216, :])
+
+            imgs.append(img[:, 40:216, :])
+            imgsx = np.concatenate(imgs, axis=1)
+            imgsxy.append(imgsx)
+        
+        imgsMatrix = np.concatenate(imgsxy, axis=0)
+        imgsaved = PIL.Image.fromarray(imgsMatrix, 'RGB').save(f'{outdir}/mixedInterp.png')
+        
         return
 
 
