@@ -1,11 +1,22 @@
 # TryOnGAN-pytorch
 
-Unofficial pytorch implementation of [TryOnGAN](https://arxiv.org/pdf/2101.02285.pdf)
-* Alphapose notebook to create pose keypoints [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/gist/confifu/b4911f00fd5f3ede6ac41cacbafb01a1/alphapose.ipynb)
-* Training Notebook [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/gist/confifu/b70a5244cb16cdbdf9100736a3da4c95/tryongan-training.ipynb)
-* Testing Notebook
+WIP : Unofficial pytorch implementation of [TryOnGAN](https://arxiv.org/pdf/2101.02285.pdf)
+There are multiple branches :
+* `UC` : Unconditioned StyleGAN2-ada, without any changes.
+* `PC-add` : Pose conditioned with pose encoders outputs added to style block outputs.
+* `PC-concat` : Pose conditioned with pose encoder's outputs concatenated to style block outputs.
 
-Dataset Links
+Useful Notebooks :
+* Alphapose notebook to create pose keypoints [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1vGjUZ8rm5HdkAOzqaM3cfYXUH3WaHH8L?usp=sharing)
+* Training Notebook for UC : [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/confifu/TryOnGAN-pytorch/blob/main/notebooks/UC.ipynb)
+* Training Notebook for PC : [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/confifu/TryOnGAN-pytorch/blob/main/notebooks/PC.ipynb)
+
+Useful links (Drive) :
+* [Trained Checkpoints](https://drive.google.com/drive/folders/1_GxdMeMDhGcFlGowQg10dANO1liS0v4Z?usp=sharing)
+* [Image Dataset](https://drive.google.com/file/d/1r_Pz2gk1Sp2sjYS7cj9oYUMbLGo9EyZS/view?usp=sharing)
+* [Pose keypoints](https://drive.google.com/file/d/1XryABeNxvzsdjEY7j4ed2m4G-we0n0md/view?usp=sharing)
+
+
 
 Some of these datasets have images only of dress or have multiple people in the same image. Such images need to be discarded or modified.
 
@@ -30,5 +41,5 @@ Some of these datasets have images only of dress or have multiple people in the 
 * [Yoga Poses - Large(6k)](https://www.kaggle.com/shrutisaxena/yoga-pose-image-classification-dataset)
 * [Human 3.6m](http://vision.imar.ro/human3.6m/description.php)
 
-StyleGAN2 code is based on [lucidrain's repo](https://github.com/lucidrains/stylegan2-pytorch)
+StyleGAN2 code is based on official [StyleGAN2-ada rep](https://github.com/NVlabs/stylegan2-ada-pytorch)
 
