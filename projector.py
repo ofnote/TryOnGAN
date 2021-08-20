@@ -84,11 +84,8 @@ def project(
     num_steps                  = 1000,
     w_avg_samples              = 10000,
     initial_learning_rate      = 0.1,
-    initial_noise_factor       = 0.05,
     lr_rampdown_length         = 0.25,
     lr_rampup_length           = 0.05,
-    noise_ramp_length          = 0.75,
-    regularize_noise_weight    = 1e5,
     verbose                    = False,
     device: torch.device
 ):
@@ -101,35 +98,46 @@ def project(
     
     w_out = []
 
-    transform = transforms.Compose([
-    transforms.ToTensor()
-    ])
-
     G = copy.deepcopy(G).eval().requires_grad_(False).to(device) # type: ignore
-    g_synthesis = G.synthesis()
-    img = transform(target)
+    g_synthesis = G.synthesis
 
-    MSE_Loss=nn.MSELoss(reduction="mean")
-
-    img_p=img.clone() #Perceptual loss
-    upsample2d=torch.nn.Upsample(scale_factor=256/G.img_resolution, mode='bilinear')
-    img_p=upsample2d(img_p)
-
+    MSE_Loss = nn.MSELoss(reduction="mean")
+    upsample2d = torch.nn.Upsample(scale_factor=256/G.img_resolution, mode='bilinear', align_corners=True)
     perceptual_net = VGG16_for_Perceptual(n_layers=[2,4,14,21]).to(device)
-    dlatent=torch.zeros((1, G.mapping.num_ws, 512),requires_grad = True,device=device)
-    optimizer = torch.optim.Adam({dlatent}, lr=0.01, betas=(0.9, 0.999), eps=1e-8)
+    
+    img = target.float().div(255)
+    img = img.to(device).unsqueeze(0)
+    img_p = img.clone() #Perceptual loss
+    img_p = upsample2d(img_p)
+
+    z_samples = np.random.RandomState(123).randn(w_avg_samples, G.z_dim)
+    w_samples = G.mapping(torch.from_numpy(z_samples).to(device), None)  # [N, L, C]
+    w_samples = w_samples.cpu().numpy().astype(np.float32)       # [N, L, C]
+    w_avg = np.mean(w_samples, axis=0, keepdims=True)      # [1, L, C]
+    
+    dlatent = torch.tensor(w_avg, dtype = torch.float32, requires_grad = True, device=device)
+    optimizer = torch.optim.Adam({dlatent}, lr = initial_learning_rate, betas=(0.9, 0.999), eps = 1e-8)
 
     print("Start")
     loss_list=[]
     for i in range(num_steps):
         optimizer.zero_grad()
+
+        t = i / num_steps
+        lr_ramp = min(1.0, (1.0 - t) / lr_rampdown_length)
+        lr_ramp = 0.5 - 0.5 * np.cos(lr_ramp * np.pi)
+        lr_ramp = lr_ramp * min(1.0, t / lr_rampup_length)
+        lr = initial_learning_rate * lr_ramp
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
         synth_img = g_synthesis(dlatent, noise_mode='const')
         synth_img = (synth_img + 1) * (255/2)
-        synth_img = transform(synth_img)
+        synth_img = synth_img.float().div(255)
         mse_loss,perceptual_loss = caluclate_loss(synth_img,img,perceptual_net,img_p,MSE_Loss,upsample2d)
-        loss = mse_loss + perceptual_loss
-        loss.backward()
+        loss = 255 * mse_loss + perceptual_loss
 
+        loss.backward()
         optimizer.step()
 
         loss_np=loss.detach().cpu().numpy()
@@ -139,11 +147,7 @@ def project(
         loss_list.append(loss_np)
         if i%10==0:
             print("iter{}: loss -- {},  mse_loss --{},  percep_loss --{}".format(i,loss_np,loss_m,loss_p))
-            #save_image(synth_img.clamp(0,1),"save_image/encode1/{}.png".format(i))
-            #np.save("loss_list.npy",loss_list)
-            #np.save("latent_W/{}.npy".format(name),dlatent.detach().cpu().numpy())
-        
-        w_out.append(dlatent.detach())
+        w_out.append(dlatent.clone().detach())
 
     return w_out
 #----------------------------------------------------------------------------
@@ -205,7 +209,7 @@ def run_projection(
         video = imageio.get_writer(f'{outdir}/proj.mp4', mode='I', fps=10, codec='libx264', bitrate='16M')
         print (f'Saving optimization progress video "{outdir}/proj.mp4"')
         for projected_w in projected_w_steps:
-            synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
+            synth_image = G.synthesis(projected_w, noise_mode='const')
             synth_image = (synth_image + 1) * (255/2)
             synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
             video.append_data(np.concatenate([target_uint8, synth_image], axis=1))
@@ -214,7 +218,7 @@ def run_projection(
     # Save final projected frame and W vector.
     target_pil.save(f'{outdir}/target.png')
     projected_w = projected_w_steps[-1]
-    synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
+    synth_image = G.synthesis(projected_w, noise_mode='const')
     synth_image = (synth_image + 1) * (255/2)
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
     PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj.png')
