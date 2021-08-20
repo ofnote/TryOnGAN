@@ -428,7 +428,7 @@ def convert_dataset(
         # Save the image as an uncompressed PNG.
         img = PIL.Image.fromarray(img, { 1: 'L', 3: 'RGB' }[channels])
         image_bits = io.BytesIO()
-        img.save(image_bits, format='png', compress_level=0, optimize=False)
+        img.save(image_bits, format='png', compress_level=1, optimize=False)
         save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer())
         labels.append([archive_fname, image['label']] if image['label'] is not None else None)
 
