@@ -22,6 +22,61 @@ import torch.nn.functional as F
 import dnnlib
 import legacy
 
+import torch
+from torchvision import models
+import torch.nn as nn
+from torchvision import transforms
+
+class VGG16_for_Perceptual(torch.nn.Module):
+    def __init__(self,requires_grad=False,n_layers=[2,4,14,21]):
+        super(VGG16_for_Perceptual,self).__init__()
+        vgg_pretrained_features=models.vgg16(pretrained=True).features
+
+        self.slice0=torch.nn.Sequential()
+        self.slice1=torch.nn.Sequential()
+        self.slice2=torch.nn.Sequential()
+        self.slice3=torch.nn.Sequential()
+
+        for x in range(n_layers[0]):#relu1_1
+            self.slice0.add_module(str(x),vgg_pretrained_features[x])
+        for x in range(n_layers[0],n_layers[1]): #relu1_2
+            self.slice1.add_module(str(x),vgg_pretrained_features[x])
+        for x in range(n_layers[1],n_layers[2]): #relu3_2
+            self.slice2.add_module(str(x),vgg_pretrained_features[x])
+
+        for x in range(n_layers[2],n_layers[3]):#relu4_2
+            self.slice3.add_module(str(x),vgg_pretrained_features[x])
+
+        if not requires_grad:
+            for param in self.parameters():
+                param.requires_grad=False
+
+    def forward(self,x):
+        h0=self.slice0(x)
+        h1=self.slice1(h0)
+        h2=self.slice2(h1)
+        h3=self.slice3(h2)
+        return h0,h1,h2,h3
+
+
+def caluclate_loss(synth_img,img,perceptual_net,img_p,MSE_Loss,upsample2d):
+     #calculate MSE Loss
+     mse_loss=MSE_Loss(synth_img,img) # (lamda_mse/N)*||G(w)-I||^2
+
+     #calculate Perceptual Loss
+     real_0,real_1,real_2,real_3=perceptual_net(img_p)
+     synth_p=upsample2d(synth_img) #(1,3,256,256)
+     synth_0,synth_1,synth_2,synth_3=perceptual_net(synth_p)
+
+     perceptual_loss=0
+     perceptual_loss+=MSE_Loss(synth_0,real_0)
+     perceptual_loss+=MSE_Loss(synth_1,real_1)
+     perceptual_loss+=MSE_Loss(synth_2,real_2)
+     perceptual_loss+=MSE_Loss(synth_3,real_3)
+
+     return mse_loss,perceptual_loss
+
+
 def project(
     G,
     target: torch.Tensor, # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
@@ -43,93 +98,54 @@ def project(
         if verbose:
             print(*args)
 
+    
+    w_out = []
+
+    transform = transforms.Compose([
+    transforms.ToTensor()
+    ])
+
     G = copy.deepcopy(G).eval().requires_grad_(False).to(device) # type: ignore
+    g_synthesis = G.synthesis()
+    img = transform(target)
 
-    # Compute w stats.
-    logprint(f'Computing W midpoint and stddev using {w_avg_samples} samples...')
-    z_samples = np.random.RandomState(123).randn(w_avg_samples, G.z_dim)
-    w_samples = G.mapping(torch.from_numpy(z_samples).to(device), None)  # [N, L, C]
-    w_samples = w_samples[:, :1, :].cpu().numpy().astype(np.float32)       # [N, 1, C]
-    w_avg = np.mean(w_samples, axis=0, keepdims=True)      # [1, 1, C]
-    w_std = (np.sum((w_samples - w_avg) ** 2) / w_avg_samples) ** 0.5
+    MSE_Loss=nn.MSELoss(reduction="mean")
 
-    # Setup noise inputs.
-    noise_bufs = { name: buf for (name, buf) in G.synthesis.named_buffers() if 'noise_const' in name }
+    img_p=img.clone() #Perceptual loss
+    upsample2d=torch.nn.Upsample(scale_factor=256/G.img_resolution, mode='bilinear')
+    img_p=upsample2d(img_p)
 
-    # Load VGG16 feature detector.
-    url = 'https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/metrics/vgg16.pt'
-    with dnnlib.util.open_url(url) as f:
-        vgg16 = torch.jit.load(f).eval().to(device)
+    perceptual_net = VGG16_for_Perceptual(n_layers=[2,4,14,21]).to(device)
+    dlatent=torch.zeros((1, G.mapping.num_ws, 512),requires_grad = True,device=device)
+    optimizer = torch.optim.Adam({dlatent}, lr=0.01, betas=(0.9, 0.999), eps=1e-8)
 
-    # Features for target image.
-    target_images = target.unsqueeze(0).to(device).to(torch.float32)
-    if target_images.shape[2] > 256:
-        target_images = F.interpolate(target_images, size=(256, 256), mode='area')
-    target_features = vgg16(target_images, resize_images=False, return_lpips=True)
-
-    w_opt = torch.tensor(w_avg, dtype=torch.float32, device=device, requires_grad=True) # pylint: disable=not-callable
-    w_out = torch.zeros([num_steps] + list(w_opt.shape[1:]), dtype=torch.float32, device=device)
-    optimizer = torch.optim.Adam([w_opt] + list(noise_bufs.values()), betas=(0.9, 0.999), lr=initial_learning_rate)
-
-    # Init noise.
-    for buf in noise_bufs.values():
-        buf[:] = torch.randn_like(buf)
-        buf.requires_grad = True
-
-    for step in range(num_steps):
-        # Learning rate schedule.
-        t = step / num_steps
-        w_noise_scale = w_std * initial_noise_factor * max(0.0, 1.0 - t / noise_ramp_length) ** 2
-        lr_ramp = min(1.0, (1.0 - t) / lr_rampdown_length)
-        lr_ramp = 0.5 - 0.5 * np.cos(lr_ramp * np.pi)
-        lr_ramp = lr_ramp * min(1.0, t / lr_rampup_length)
-        lr = initial_learning_rate * lr_ramp
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-
-        # Synth images from opt_w.
-        w_noise = torch.randn_like(w_opt) * w_noise_scale
-        ws = (w_opt + w_noise).repeat([1, G.mapping.num_ws, 1])
-        synth_images = G.synthesis(ws, noise_mode='const')
-
-        # Downsample image to 256x256 if it's larger than that. VGG was built for 224x224 images.
-        synth_images = (synth_images + 1) * (255/2)
-        if synth_images.shape[2] > 256:
-            synth_images = F.interpolate(synth_images, size=(256, 256), mode='area')
-
-        # Features for synth images.
-        synth_features = vgg16(synth_images, resize_images=False, return_lpips=True)
-        dist = (target_features - synth_features).square().sum()
-
-        # Noise regularization.
-        reg_loss = 0.0
-        for v in noise_bufs.values():
-            noise = v[None,None,:,:] # must be [1,1,H,W] for F.avg_pool2d()
-            while True:
-                reg_loss += (noise*torch.roll(noise, shifts=1, dims=3)).mean()**2
-                reg_loss += (noise*torch.roll(noise, shifts=1, dims=2)).mean()**2
-                if noise.shape[2] <= 8:
-                    break
-                noise = F.avg_pool2d(noise, kernel_size=2)
-        loss = dist + reg_loss * regularize_noise_weight
-
-        # Step
-        optimizer.zero_grad(set_to_none=True)
+    print("Start")
+    loss_list=[]
+    for i in range(num_steps):
+        optimizer.zero_grad()
+        synth_img = g_synthesis(dlatent, noise_mode='const')
+        synth_img = (synth_img + 1) * (255/2)
+        synth_img = transform(synth_img)
+        mse_loss,perceptual_loss = caluclate_loss(synth_img,img,perceptual_net,img_p,MSE_Loss,upsample2d)
+        loss = mse_loss + perceptual_loss
         loss.backward()
+
         optimizer.step()
-        logprint(f'step {step+1:>4d}/{num_steps}: dist {dist:<4.2f} loss {float(loss):<5.2f}')
 
-        # Save projected W for each optimization step.
-        w_out[step] = w_opt.detach()[0]
+        loss_np=loss.detach().cpu().numpy()
+        loss_p=perceptual_loss.detach().cpu().numpy()
+        loss_m=mse_loss.detach().cpu().numpy()
 
-        # Normalize noise.
-        with torch.no_grad():
-            for buf in noise_bufs.values():
-                buf -= buf.mean()
-                buf *= buf.square().mean().rsqrt()
+        loss_list.append(loss_np)
+        if i%10==0:
+            print("iter{}: loss -- {},  mse_loss --{},  percep_loss --{}".format(i,loss_np,loss_m,loss_p))
+            #save_image(synth_img.clamp(0,1),"save_image/encode1/{}.png".format(i))
+            #np.save("loss_list.npy",loss_list)
+            #np.save("latent_W/{}.npy".format(name),dlatent.detach().cpu().numpy())
+        
+        w_out.append(dlatent.detach())
 
-    return w_out.repeat([1, G.mapping.num_ws, 1])
-
+    return w_out
 #----------------------------------------------------------------------------
 
 @click.command()
