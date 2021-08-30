@@ -150,6 +150,37 @@ def project(
         w_out.append(dlatent.clone().detach())
 
     return w_out
+
+def getProjection(
+    network_pkl,
+    target_fname,
+    num_steps
+):
+
+    # Load networks.
+    print('Loading networks from "%s"...' % network_pkl)
+    device = torch.device('cuda')
+    with dnnlib.util.open_url(network_pkl) as fp:
+        G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device) # type: ignore
+
+    # Load target image.
+    target_pil = PIL.Image.open(target_fname).convert('RGB')
+    w, h = target_pil.size
+    s = min(w, h)
+    target_pil = target_pil.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
+    target_pil = target_pil.resize((G.img_resolution, G.img_resolution), PIL.Image.LANCZOS)
+    target_uint8 = np.array(target_pil, dtype=np.uint8)
+
+    # Optimize projection.
+    projected_w_steps = project(
+        G,
+        target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device), # pylint: disable=not-callable
+        num_steps=num_steps,
+        device=device,
+        verbose=True
+    )
+    return projected_w_steps[-1]
+
 #----------------------------------------------------------------------------
 
 @click.command()
