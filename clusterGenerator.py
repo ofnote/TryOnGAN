@@ -9,6 +9,8 @@ import numpy as np
 import torch
 
 from sklearn.cluster import KMeans
+import pickle
+from projector import getProjection
 
 import legacy
 
@@ -58,7 +60,8 @@ def generate_clusters(
     seeds,
     truncation_psi,
     n_colors,
-    featureLayer
+    featureLayer,
+    kmeans_path = None
 ):
 
     '''
@@ -104,20 +107,33 @@ def generate_clusters(
     features_tr = features_all.permute(0, 2, 3, 1)
     features_flat = features_tr.reshape(-1, features_tr.shape[-1])
     arr = features_flat.detach().cpu().numpy()
-    kmeans = KMeans(n_clusters=n_colors, random_state=42).fit(arr)
 
-    labels = kmeans.labels_
-    centers = kmeans.cluster_centers_
-    labels_spatial = labels.reshape(features_all.shape[0], features_all.shape[2], features_all.shape[3])
+    if kmeans_path is None:
+        #train a kmeans model and get clusters and labels
+        kmeans = KMeans(n_clusters=n_colors, random_state=42).fit(arr)
+        labels = kmeans.labels_
+        centers = kmeans.cluster_centers_
+        labels_spatial = labels.reshape(features_all.shape[0], features_all.shape[2], features_all.shape[3])
 
-    imgs_all = torch.cat(imgs, axis=0)
-    img_arr = imgs_all.permute(0, 2, 3, 1).detach().cpu().numpy()
+        imgs_all = torch.cat(imgs, axis=0)
+        img_arr = imgs_all.permute(0, 2, 3, 1).detach().cpu().numpy()
 
-    return kmeans, centers, labels_spatial, img_arr
+        return kmeans, centers, labels_spatial, img_arr
+
+    else:
+        #use a saved kmeans pickle
+        with open(kmeans_path, "rb") as f:
+            kmeans = pickle.load(f)
+
+        predictions_flat = kmeans.predict(arr)
+        labels_spatial = predictions_flat.reshape(features_all.shape[0], features_all.shape[2], features_all.shape[3])
+
+        imgs_all = torch.cat(imgs, axis=0)
+        img_arr = imgs_all.permute(0, 2, 3, 1).detach().cpu().numpy()
+
+        return labels_spatial, img_arr
 
 
-from projector import getProjection
-import pickle
 
 def clusterRealImage(
     network_pkl,
