@@ -288,10 +288,7 @@ class SynthesisLayer(torch.nn.Module):
         in_resolution = self.resolution // self.up
         misc.assert_shape(x, [None, self.weight.shape[1], in_resolution, in_resolution])
         if styles is None:
-            self.styles = self.affine(w)
-        else:
-            self.styles = styles
-
+            styles = self.affine(w)
         noise = None
         if self.use_noise and noise_mode == 'random':
             noise = torch.randn([x.shape[0], 1, self.resolution, self.resolution], device=x.device) * self.noise_strength
@@ -299,7 +296,7 @@ class SynthesisLayer(torch.nn.Module):
             noise = self.noise_const * self.noise_strength
 
         flip_weight = (self.up == 1) # slightly faster
-        x = modulated_conv2d(x=x, weight=self.weight, styles=self.styles, noise=noise, up=self.up,
+        x = modulated_conv2d(x=x, weight=self.weight, styles=styles, noise=noise, up=self.up,
             padding=self.padding, resample_filter=self.resample_filter, flip_weight=flip_weight, fused_modconv=fused_modconv)
 
         act_gain = self.act_gain * gain
@@ -322,10 +319,8 @@ class ToRGBLayer(torch.nn.Module):
 
     def forward(self, x, w, styles=None, fused_modconv=True):
         if styles is None:
-            self.styles = self.affine(w) * self.weight_gain
-        else :
-            self.styles = styles
-        x = modulated_conv2d(x=x, weight=self.weight, styles=self.styles, demodulate=False, fused_modconv=fused_modconv)
+            styles = self.affine(w) * self.weight_gain
+        x = modulated_conv2d(x=x, weight=self.weight, styles=styles, demodulate=False, fused_modconv=fused_modconv)
         x = bias_act.bias_act(x, self.bias.to(x.dtype), clamp=self.conv_clamp)
         return x
 
